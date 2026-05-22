@@ -1,4 +1,4 @@
-# PRD: SuperMan — 端到端交付全栈项目的"超级个体"
+# PRD: TheHand — 端到端交付全栈项目的"超级个体"
 
 ## 一、产品定位
 
@@ -9,15 +9,15 @@
 ### 核心价值
 
 Claude Code 是**开发者的工具**——开发者自己想清楚要改什么，告诉 AI 怎么改。
-SuperMan 是 **PM 的流水线**——PM 说一句话，系统自动完成全部工作。
+TheHand 是 **PM 的流水线**——PM 说一句话，系统自动完成全部工作。
 
-| | Claude Code | SuperMan |
+| | Claude Code | TheHand |
 |---|---|---|
 | 驱动者 | 开发者 | PM |
 | 开发者需要做什么 | 想清楚需求，告诉 AI 怎么改 | 等 PR，review 就行 |
 | PM 需要做什么 | 不会用 | 直接对话 |
 
-**核心区别：Claude Code 让开发者更快，SuperMan 让 PM 直接能交付。**
+**核心区别：Claude Code 让开发者更快，TheHand 让 PM 直接能交付。**
 
 ### 系统是什么
 
