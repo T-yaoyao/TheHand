@@ -1,0 +1,23 @@
+# 敏感信息
+.env
+.env.*
+
+# Node
+node_modules/
+
+# Python
+venv/
+__pycache__/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# 日志
+*.log
+
+# sandbox-repo（不需要提交到 SuperMan 仓库）
+sandbox-repo/
