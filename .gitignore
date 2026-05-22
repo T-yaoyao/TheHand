@@ -19,5 +19,9 @@ __pycache__/
 # 日志
 *.log
 
+# 大文件
+*.pdf
+*.docx
+
 # sandbox-repo（不需要提交到 SuperMan 仓库）
 sandbox-repo/
