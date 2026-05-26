@@ -6,17 +6,16 @@ export interface OrchestratorEvent {
   agent?: string
   phase?: string
   progress?: number
-  requirement?: any
-  plan?: any[]
+  requirement?: { status?: string; pmInput?: string; structuredRequirement?: unknown; plan?: unknown }
+  plan?: { path: string; changeDescription: string; priority?: number }[]
   questions?: string[]
   passed?: boolean
   details?: string
   error?: string
+  requirementId?: string
+  projectId?: string
 }
 
-/**
- * SSE Hook — 订阅 Orchestrator 实时事件
- */
 export function useSSE(requirementId: string | null) {
   const [events, setEvents] = useState<OrchestratorEvent[]>([])
   const [connected, setConnected] = useState(false)
@@ -31,27 +30,24 @@ export function useSSE(requirementId: string | null) {
       return
     }
 
-    const url = `/api/events/${requirementId}`
-    const source = new EventSource(url)
+    const source = new EventSource(`/api/events/${requirementId}`)
     sourceRef.current = source
 
-    source.onopen = () => {
-      setConnected(true)
-    }
+    source.onopen = () => setConnected(true)
 
     source.onmessage = (e) => {
       try {
         const event: OrchestratorEvent = JSON.parse(e.data)
+        if (event.type === 'connected') return
         setLatestEvent(event)
-        setEvents(prev => [...prev, event])
+        setEvents((prev) => [...prev, event])
       } catch {
-        // heartbeat 或非 JSON 数据，忽略
+        // heartbeat
       }
     }
 
     source.onerror = () => {
       setConnected(false)
-      source.close()
     }
 
     return () => {

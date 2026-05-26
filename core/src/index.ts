@@ -20,9 +20,11 @@ export { createShellTool } from './tools/shell-tool.js'
 export type {
   Requirement,
   RequirementStatus,
+  Conversation,
   StructuredRequirement,
   AgentDefinition,
   AgentContext,
+  MemoryContext,
   AgentResult,
   SkillDefinition,
   SkillOutput,

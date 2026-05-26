@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { log } from '../logger.js';
 /**
  * SSE 事件路由
  * 为前端提供实时状态推送
@@ -6,6 +7,9 @@ import { Router } from 'express';
 export const eventsRouter = Router();
 // 存储活跃的 SSE 连接
 const clients = new Map();
+export function getActiveConnectionCount() {
+    return clients.size;
+}
 /**
  * GET /api/events/:id — 订阅需求的实时事件 (SSE)
  */
@@ -22,6 +26,7 @@ eventsRouter.get('/:id', (req, res) => {
     res.write(`data: ${JSON.stringify({ type: 'connected', requirementId })}\n\n`);
     // 存储连接
     clients.set(requirementId, res);
+    log.info(`[sse] 连接 requirement=${requirementId.slice(0, 8)}… (共 ${clients.size} 路)`);
     // 心跳保活
     const heartbeat = setInterval(() => {
         res.write(':heartbeat\n\n');
@@ -30,6 +35,7 @@ eventsRouter.get('/:id', (req, res) => {
     req.on('close', () => {
         clearInterval(heartbeat);
         clients.delete(requirementId);
+        log.info(`[sse] 断开 requirement=${requirementId.slice(0, 8)}… (剩余 ${clients.size} 路)`);
     });
 });
 /**

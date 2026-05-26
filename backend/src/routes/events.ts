@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import type { Request, Response } from 'express'
+import { log } from '../logger.js'
 
 /**
  * SSE 事件路由
@@ -9,6 +10,10 @@ export const eventsRouter = Router()
 
 // 存储活跃的 SSE 连接
 const clients = new Map<string, Response>()
+
+export function getActiveConnectionCount(): number {
+  return clients.size
+}
 
 /**
  * GET /api/events/:id — 订阅需求的实时事件 (SSE)
@@ -29,6 +34,7 @@ eventsRouter.get('/:id', (req: Request, res: Response) => {
 
   // 存储连接
   clients.set(requirementId, res)
+  log.info(`[sse] 连接 requirement=${requirementId.slice(0, 8)}… (共 ${clients.size} 路)`)
 
   // 心跳保活
   const heartbeat = setInterval(() => {
@@ -39,6 +45,7 @@ eventsRouter.get('/:id', (req: Request, res: Response) => {
   req.on('close', () => {
     clearInterval(heartbeat)
     clients.delete(requirementId)
+    log.info(`[sse] 断开 requirement=${requirementId.slice(0, 8)}… (剩余 ${clients.size} 路)`)
   })
 })
 

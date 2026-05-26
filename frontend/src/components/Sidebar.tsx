@@ -1,0 +1,94 @@
+import type { Requirement } from '../services/api'
+import { StatusBadge } from './StatusBadge'
+import { formatTime } from '../utils/status'
+
+interface SidebarProps {
+  requirements: Requirement[]
+  selectedId: string | null
+  newInput: string
+  loading: boolean
+  onNewInputChange: (v: string) => void
+  onCreate: () => void
+  onSelect: (req: Requirement) => void
+  onRefresh: () => void
+}
+
+export function Sidebar({
+  requirements,
+  selectedId,
+  newInput,
+  loading,
+  onNewInputChange,
+  onCreate,
+  onSelect,
+  onRefresh,
+}: SidebarProps) {
+  return (
+    <aside className="sidebar">
+      <div className="sidebar-header">
+        <div className="logo">
+          <span className="logo-icon">✋</span>
+          <div>
+            <h1>TheHand</h1>
+            <p>PM 需求交付</p>
+          </div>
+        </div>
+        <button type="button" className="btn-ghost btn-icon" onClick={onRefresh} title="刷新列表">
+          ↻
+        </button>
+      </div>
+
+      <div className="sidebar-compose">
+        <label className="label">新建需求</label>
+        <textarea
+          className="textarea"
+          value={newInput}
+          onChange={(e) => onNewInputChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault()
+              onCreate()
+            }
+          }}
+          placeholder="用自然语言描述需求，例如：给文章详情页加阅读时长…"
+          rows={4}
+        />
+        <button
+          type="button"
+          className="btn-primary"
+          onClick={onCreate}
+          disabled={loading || !newInput.trim()}
+        >
+          {loading ? '创建中…' : '创建需求'}
+        </button>
+        <span className="hint">Ctrl+Enter 快速创建</span>
+      </div>
+
+      <div className="sidebar-list-header">
+        <span>需求列表</span>
+        <span className="count">{requirements.length}</span>
+      </div>
+
+      <div className="sidebar-list">
+        {requirements.length === 0 ? (
+          <p className="empty-hint">暂无需求，在上方创建</p>
+        ) : (
+          requirements.map((req) => (
+            <button
+              key={req.id}
+              type="button"
+              className={`req-card ${selectedId === req.id ? 'req-card-active' : ''}`}
+              onClick={() => onSelect(req)}
+            >
+              <p className="req-card-title">{req.pm_input}</p>
+              <div className="req-card-meta">
+                <StatusBadge status={req.status} />
+                <time>{formatTime(req.created_at)}</time>
+              </div>
+            </button>
+          ))
+        )}
+      </div>
+    </aside>
+  )
+}

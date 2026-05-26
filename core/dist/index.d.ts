@@ -16,5 +16,5 @@ export { runClarification } from './agents/clarification-agent.js';
 export { createFileReadTool } from './tools/file-read-tool.js';
 export { createFileWriteTool } from './tools/file-write-tool.js';
 export { createShellTool } from './tools/shell-tool.js';
-export type { Requirement, RequirementStatus, StructuredRequirement, AgentDefinition, AgentContext, AgentResult, SkillDefinition, SkillOutput, Tool, ToolResult, ToolContext, ProjectContext, OrchestratorEvent, ExecutionRecord, } from './types.js';
+export type { Requirement, RequirementStatus, Conversation, StructuredRequirement, AgentDefinition, AgentContext, MemoryContext, AgentResult, SkillDefinition, SkillOutput, Tool, ToolResult, ToolContext, ProjectContext, OrchestratorEvent, ExecutionRecord, } from './types.js';
 //# sourceMappingURL=index.d.ts.map

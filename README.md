@@ -95,13 +95,23 @@ node cli-orchestrator.mjs "给 Popular Tags 前 5 个标签加视觉标识"
 3. 跑完整 Orchestrator
 4. 在 `logs/` 写入运行日志
 
-### 5. 启动 Web（可选）
+### 5. 启动 Web 界面
 
 ```bash
-npm run dev
-# 后端默认 http://localhost:3000
-# 前端默认 http://localhost:5173
+# 终端 1：API + Orchestrator
+npm run dev:backend
+
+# 终端 2：前端
+npm run dev:frontend
 ```
+
+浏览器打开 http://localhost:5173 ：
+
+1. 左侧创建需求  
+2. 选中需求后切到 **「进度」** Tab（建立 SSE）  
+3. 点击 **「▶ 运行流水线」**（后端会真正执行 Orchestrator 并推送事件）
+
+需已配置根目录 `.env`（`DOUBAO_*`），且存在 `sandbox-repo/conduit-realworld-example-app`。
 
 ## 核心模块（`core/`）
 

@@ -19,52 +19,78 @@ export interface Conversation {
   created_at: string
 }
 
+export interface FilePlan {
+  path: string
+  changeDescription: string
+  priority: number
+}
+
+async function handleResponse<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error((err as { error?: string }).error ?? '请求失败')
+  }
+  return res.json()
+}
+
 export const api = {
-  // 需求
   async createRequirement(input: string): Promise<Requirement> {
     const res = await fetch(`${BASE}/requirements`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ input }),
     })
-    return res.json()
+    return handleResponse(res)
   },
 
   async getRequirements(): Promise<Requirement[]> {
     const res = await fetch(`${BASE}/requirements`)
-    return res.json()
+    return handleResponse(res)
   },
 
   async getRequirement(id: string): Promise<Requirement> {
     const res = await fetch(`${BASE}/requirements/${id}`)
-    return res.json()
+    return handleResponse(res)
   },
 
-  async updateRequirement(id: string, data: Partial<Requirement>): Promise<Requirement> {
+  async updateRequirement(id: string, data: Record<string, unknown>): Promise<Requirement> {
     const res = await fetch(`${BASE}/requirements/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     })
-    return res.json()
+    return handleResponse(res)
   },
 
   async deleteRequirement(id: string): Promise<void> {
-    await fetch(`${BASE}/requirements/${id}`, { method: 'DELETE' })
+    const res = await fetch(`${BASE}/requirements/${id}`, { method: 'DELETE' })
+    await handleResponse(res)
   },
 
-  // 对话
   async getConversations(requirementId: string): Promise<Conversation[]> {
     const res = await fetch(`${BASE}/requirements/${requirementId}/conversations`)
-    return res.json()
+    return handleResponse(res)
   },
 
-  async addConversation(requirementId: string, role: string, content: string): Promise<Conversation> {
+  async addConversation(
+    requirementId: string,
+    role: string,
+    content: string,
+  ): Promise<Conversation> {
     const res = await fetch(`${BASE}/requirements/${requirementId}/conversations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ role, content }),
     })
-    return res.json()
+    return handleResponse(res)
+  },
+
+  async runOrchestrator(requirementId: string, projectId = 'conduit'): Promise<{ ok: boolean; message: string }> {
+    const res = await fetch(`${BASE}/orchestrator/run/${requirementId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId }),
+    })
+    return handleResponse(res)
   },
 }

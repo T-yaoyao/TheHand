@@ -3,6 +3,7 @@
  * 为前端提供实时状态推送
  */
 export declare const eventsRouter: import("express-serve-static-core").Router;
+export declare function getActiveConnectionCount(): number;
 /**
  * 广播事件给所有订阅者
  */
