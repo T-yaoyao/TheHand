@@ -1,0 +1,22 @@
+{
+  "Article": {
+    "file": "backend/models/Article.js",
+    "fields": ["slug", "title", "description", "body", "tagList", "createdAt", "updatedAt", "favorited", "favoritesCount"],
+    "associations": ["User (author)", "Comment", "Tag"]
+  },
+  "User": {
+    "file": "backend/models/User.js",
+    "fields": ["email", "username", "password", "bio", "image"],
+    "associations": ["Article", "Comment"]
+  },
+  "Comment": {
+    "file": "backend/models/Comment.js",
+    "fields": ["body", "createdAt", "updatedAt"],
+    "associations": ["Article", "User (author)"]
+  },
+  "Tag": {
+    "file": "backend/models/Tag.js",
+    "fields": ["name"],
+    "associations": ["Article"]
+  }
+}

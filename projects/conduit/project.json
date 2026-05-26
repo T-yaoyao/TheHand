@@ -1,0 +1,62 @@
+{
+  "id": "conduit",
+  "name": "Conduit - RealWorld Example App",
+  "repo": "https://github.com/TonyMckes/conduit-realworld-example-app",
+  "techStack": {
+    "frontend": "React 18 + Vite",
+    "backend": "Express 4 + Sequelize",
+    "database": "SQLite (开发) / PostgreSQL (生产)",
+    "language": "JavaScript (纯 JS，无 TypeScript)"
+  },
+  "structure": {
+    "frontend": "frontend/src/",
+    "backend": "backend/",
+    "models": "backend/models/",
+    "routes": "backend/routes/",
+    "components": "frontend/src/components/"
+  },
+  "keyFiles": {
+    "models": [
+      "backend/models/Article.js",
+      "backend/models/User.js",
+      "backend/models/Comment.js",
+      "backend/models/Tag.js"
+    ],
+    "routes": [
+      "backend/routes/articles.js",
+      "backend/routes/articles/comments.js",
+      "backend/routes/articles/favorites.js",
+      "backend/routes/user.js",
+      "backend/routes/users.js",
+      "backend/routes/profiles.js",
+      "backend/routes/tags.js"
+    ],
+    "components": [
+      "frontend/src/components/ArticleView.js",
+      "frontend/src/components/ArticlePreview.js",
+      "frontend/src/components/ArticleEditor.js",
+      "frontend/src/components/ArticleMeta/index.js",
+      "frontend/src/components/ArticlesPreview/index.js",
+      "frontend/src/components/PopularTags/index.js",
+      "frontend/src/components/FeedToggler/index.js",
+      "frontend/src/components/Navbar/index.js",
+      "frontend/src/components/AuthorInfo/index.js",
+      "frontend/src/components/FavButton/index.js",
+      "frontend/src/components/FollowButton/index.js",
+      "frontend/src/components/CommentEditor/index.js",
+      "frontend/src/components/CommentList/index.js"
+    ],
+    "services": [
+      "frontend/src/services/getArticle.js",
+      "frontend/src/services/getArticles.js",
+      "frontend/src/services/setArticle.js",
+      "frontend/src/services/getTags.js"
+    ]
+  },
+  "commands": {
+    "lint": "npx eslint backend/ frontend/src/ --max-warnings 100 || true",
+    "test": "npm test -- --run",
+    "dev": "npm run dev",
+    "build": "npm run build"
+  }
+}

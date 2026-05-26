@@ -1,6 +1,6 @@
 # 敏感信息
 .env
-.env.*
+!.env.example
 
 # Node
 node_modules/

@@ -1,0 +1,26 @@
+{
+  "name": "thehand",
+  "version": "0.1.0",
+  "private": true,
+  "description": "端到端交付全栈项目的超级个体",
+  "workspaces": [
+    "core",
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "install:all": "npm install",
+    "setup": "npm install && npm run build:core",
+    "build:core": "npm run build -w @thehand/core",
+    "build:all": "npm run build -w @thehand/core && npm run build -w @thehand/backend && npm run build -w @thehand/frontend",
+    "dev:backend": "npm run dev -w @thehand/backend",
+    "dev:frontend": "npm run dev -w @thehand/frontend",
+    "dev": "npm run dev:backend & npm run dev:frontend",
+    "test:backend": "npm run test -w @thehand/backend",
+    "test:core": "npm run test -w @thehand/core",
+    "test": "npm run test:core && npm run test:backend"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
