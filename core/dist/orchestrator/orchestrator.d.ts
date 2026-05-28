@@ -3,15 +3,21 @@ import type { AgentRunner } from '../agents/agent-runner.js';
 import type { SkillRegistry } from '../skill-registry/skill-registry.js';
 import type { LLMClient } from '../llm/llm-client.js';
 import type { PromptManager } from '../llm/prompt-manager.js';
-import { SandboxManager } from '../git-ops/sandbox.js';
+import type { Sandbox } from '../git-ops/sandbox.js';
 import { RequirementMemory } from '../memory/requirement-memory.js';
 import { ProjectMemory } from '../memory/project-memory.js';
+export interface SandboxManagerLike {
+    create(id?: string): Promise<Sandbox>;
+    applyToSource(sandbox: Sandbox, files: string[], commitMessage?: string): Promise<void>;
+    cleanupAll(): Promise<void>;
+    getActiveCount(): number;
+}
 export interface OrchestratorDeps {
     agentRunner: AgentRunner;
     llmClient: LLMClient;
     promptManager: PromptManager;
     skillRegistry: SkillRegistry;
-    sandboxManager: SandboxManager;
+    sandboxManager: SandboxManagerLike;
     projectMemory: ProjectMemory;
     requirementMemory: RequirementMemory;
 }

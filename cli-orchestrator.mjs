@@ -63,7 +63,7 @@ async function main() {
     PromptManager,
     AgentRunner,
     SkillRegistry,
-    SandboxManager,
+    DockerSandboxManager,
     RequirementMemory,
     ProjectMemory,
     Orchestrator,
@@ -83,9 +83,13 @@ async function main() {
   const projectMemory = new ProjectMemory(resolve(__dirname, 'projects'))
   const requirementMemory = new RequirementMemory()
 
-  // 创建沙箱管理器
+  // 创建沙箱管理器（Docker 容器隔离）
   const sandboxPath = resolve(__dirname, 'sandbox-repo', 'conduit-realworld-example-app')
-  const sandboxManager = new SandboxManager(sandboxPath)
+  const sandboxManager = new DockerSandboxManager(sandboxPath, {
+    network: process.env.SANDBOX_NETWORK ?? 'none',
+    memory: process.env.SANDBOX_MEMORY ?? '1g',
+    cpus: process.env.SANDBOX_CPUS ?? '1.0',
+  })
 
   // 创建工具
   const tools = [

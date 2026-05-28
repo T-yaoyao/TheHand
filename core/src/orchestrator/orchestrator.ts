@@ -16,18 +16,27 @@ import type { PromptManager } from '../llm/prompt-manager.js'
 import { runClarification } from '../agents/clarification-agent.js'
 import { createPlanAgent } from '../agents/plan-agent.js'
 import { runCoding } from '../agents/coding-agent.js'
-import { SandboxManager } from '../git-ops/sandbox.js'
+import type { Sandbox } from '../git-ops/sandbox.js'
+import type { DockerSandboxManager } from '../git-ops/docker-sandbox.js'
+import type { CommandExecutor } from '../git-ops/executor.js'
 import { TestRunner } from '../git-ops/test-runner.js'
 import { RepoManager } from '../git-ops/repo-manager.js'
 import { RequirementMemory } from '../memory/requirement-memory.js'
 import { ProjectMemory } from '../memory/project-memory.js'
+
+export interface SandboxManagerLike {
+  create(id?: string): Promise<Sandbox>
+  applyToSource(sandbox: Sandbox, files: string[], commitMessage?: string): Promise<void>
+  cleanupAll(): Promise<void>
+  getActiveCount(): number
+}
 
 export interface OrchestratorDeps {
   agentRunner: AgentRunner
   llmClient: LLMClient
   promptManager: PromptManager
   skillRegistry: SkillRegistry
-  sandboxManager: SandboxManager
+  sandboxManager: SandboxManagerLike
   projectMemory: ProjectMemory
   requirementMemory: RequirementMemory
 }
@@ -51,9 +60,13 @@ export class Orchestrator {
     const sandbox = await sandboxManager.create(requirement.id)
     yield { type: 'executing', phase: 'sandbox-ready', progress: 5 }
 
-    // 初始化测试运行器和仓库管理器
-    const testRunner = new TestRunner(sandbox.path)
-    const repoManager = new RepoManager(sandbox.path)
+    // 初始化测试运行器和仓库管理器（Docker 沙箱时命令在容器内执行）
+    const executor: CommandExecutor | undefined =
+      'getExecutor' in sandboxManager
+        ? (sandboxManager as DockerSandboxManager).getExecutor(sandbox)
+        : undefined
+    const testRunner = new TestRunner(sandbox.path, executor)
+    const repoManager = new RepoManager(sandbox.path, executor)
 
     // 2. 加载项目上下文
     const projectContext = await projectMemory.load(projectId)

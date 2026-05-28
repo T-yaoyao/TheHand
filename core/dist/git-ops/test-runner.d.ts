@@ -1,3 +1,4 @@
+import type { CommandExecutor } from './executor.js';
 export interface TestStepResult {
     name: string;
     passed: boolean;
@@ -15,7 +16,8 @@ export interface TestRunResult {
  */
 export declare class TestRunner {
     private sandboxPath;
-    constructor(sandboxPath: string);
+    private executor;
+    constructor(sandboxPath: string, executor?: CommandExecutor);
     /**
      * 执行完整的测试流程：lint → test → (失败时) auto-fix → retry
      * lint 作为非阻塞检查（warnings 不阻断），test 作为阻塞检查

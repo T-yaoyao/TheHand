@@ -22,9 +22,12 @@ export class Orchestrator {
         yield { type: 'executing', phase: 'sandbox-create', progress: 0 };
         const sandbox = await sandboxManager.create(requirement.id);
         yield { type: 'executing', phase: 'sandbox-ready', progress: 5 };
-        // 初始化测试运行器和仓库管理器
-        const testRunner = new TestRunner(sandbox.path);
-        const repoManager = new RepoManager(sandbox.path);
+        // 初始化测试运行器和仓库管理器（Docker 沙箱时命令在容器内执行）
+        const executor = 'getExecutor' in sandboxManager
+            ? sandboxManager.getExecutor(sandbox)
+            : undefined;
+        const testRunner = new TestRunner(sandbox.path, executor);
+        const repoManager = new RepoManager(sandbox.path, executor);
         // 2. 加载项目上下文
         const projectContext = await projectMemory.load(projectId);
         try {

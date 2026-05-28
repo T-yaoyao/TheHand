@@ -1,3 +1,4 @@
+import type { CommandExecutor } from './executor.js';
 export interface CleanCheckResult {
     clean: boolean;
     autoCleaned?: boolean;
@@ -19,7 +20,8 @@ export interface CommitResult {
  */
 export declare class RepoManager {
     private sandboxPath;
-    constructor(sandboxPath: string);
+    private executor;
+    constructor(sandboxPath: string, executor?: CommandExecutor);
     /**
      * 清洁检查：检测 sandbox-repo 是否有脏状态
      */

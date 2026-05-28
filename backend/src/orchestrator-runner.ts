@@ -4,7 +4,7 @@ import {
   PromptManager,
   AgentRunner,
   SkillRegistry,
-  SandboxManager,
+  DockerSandboxManager,
   ProjectMemory,
   RequirementMemory,
   Orchestrator,
@@ -34,7 +34,11 @@ async function getDeps() {
       const promptManager = new PromptManager(resolve(repoRoot, 'prompts'))
       const projectMemory = new ProjectMemory(resolve(repoRoot, 'projects'))
       const requirementMemory = new DbRequirementMemory() as unknown as RequirementMemory
-      const sandboxManager = new SandboxManager(sandboxSource)
+      const sandboxManager = new DockerSandboxManager(sandboxSource, {
+        network: process.env.SANDBOX_NETWORK ?? 'none',
+        memory: process.env.SANDBOX_MEMORY ?? '1g',
+        cpus: process.env.SANDBOX_CPUS ?? '1.0',
+      })
 
       const tools = [
         createFileReadTool(sandboxSource),
