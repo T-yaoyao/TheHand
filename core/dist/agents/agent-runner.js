@@ -64,7 +64,7 @@ export class AgentRunner {
                             const parsed = tool.inputSchema.safeParse(tc.arguments);
                             const input = parsed.success ? parsed.data : tc.arguments;
                             const result = await tool.call(input, {
-                                sandboxPath: '', // 由外部注入
+                                sandboxPath: context.sandboxPath ?? '', // 从上下文中获取沙箱路径
                                 backupStore: {
                                     save: async () => { },
                                     restore: async () => null,

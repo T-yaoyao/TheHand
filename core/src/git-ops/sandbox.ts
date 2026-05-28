@@ -1,11 +1,71 @@
 import { exec } from 'child_process'
 import { promisify } from 'util'
-import { mkdtemp, rm, cp, mkdir } from 'fs/promises'
-import { join } from 'path'
+import { mkdtemp, rm, cp, mkdir, readdir, stat, copyFile } from 'fs/promises'
+import { join, relative } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
 
 const execAsync = promisify(exec)
+
+/**
+ * 递归复制目录，排除指定文件夹（替代 rsync）
+ */
+async function copyDirRecursive(src: string, dest: string, excludeDirs: Set<string>): Promise<void> {
+  await mkdir(dest, { recursive: true })
+  const entries = await readdir(src, { withFileTypes: true })
+  for (const entry of entries) {
+    if (excludeDirs.has(entry.name)) continue
+    const srcPath = join(src, entry.name)
+    const destPath = join(dest, entry.name)
+    if (entry.isDirectory()) {
+      await copyDirRecursive(srcPath, destPath, excludeDirs)
+    } else {
+      await copyFile(srcPath, destPath)
+    }
+  }
+}
+
+/**
+ * 对比两个目录的差异（替代 diff -rq）
+ */
+async function diffDirs(dir1: string, dir2: string, excludeDirs: Set<string>, base = ''): Promise<string> {
+  let result = ''
+  const entries1 = await readdir(dir1, { withFileTypes: true }).catch(() => [])
+  for (const entry of entries1) {
+    if (excludeDirs.has(entry.name)) continue
+    const rel = base ? `${base}/${entry.name}` : entry.name
+    const p1 = join(dir1, entry.name)
+    const p2 = join(dir2, entry.name)
+    const exists = await stat(p2).then(() => true).catch(() => false)
+    if (entry.isDirectory()) {
+      if (!exists) {
+        result += `Only in ${dir1}: ${entry.name}\n`
+      } else {
+        result += await diffDirs(p1, p2, excludeDirs, rel)
+      }
+    } else {
+      if (!exists) {
+        result += `Only in ${dir1}: ${entry.name}\n`
+      }
+    }
+  }
+  const entries2 = await readdir(dir2, { withFileTypes: true }).catch(() => [])
+  for (const entry of entries2) {
+    if (excludeDirs.has(entry.name)) continue
+    const rel = base ? `${base}/${entry.name}` : entry.name
+    const p1 = join(dir1, entry.name)
+    const p2 = join(dir2, entry.name)
+    const exists = await stat(p1).then(() => true).catch(() => false)
+    if (!exists) {
+      if (entry.isDirectory()) {
+        result += `Only in ${dir2}: ${entry.name}\n`
+      } else {
+        result += `Only in ${dir2}: ${entry.name}\n`
+      }
+    }
+  }
+  return result
+}
 
 export interface Sandbox {
   /** 沙箱工作目录（完整副本） */

@@ -52,6 +52,7 @@ export class Orchestrator {
                 requirement,
                 projectContext,
                 memory: await requirementMemory.getContext(requirement.id, projectContext),
+                sandboxPath: sandbox.path,
             };
             const planResult = await agentRunner.run(createPlanAgent(), planContext);
             if (planResult.status === 'failed' || !planResult.output) {

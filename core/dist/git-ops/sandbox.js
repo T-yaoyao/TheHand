@@ -1,10 +1,89 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { mkdtemp, rm, mkdir } from 'fs/promises';
+import { mkdtemp, rm, mkdir, readdir, lstat, stat, copyFile, readlink, symlink } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 const execAsync = promisify(exec);
+/**
+ * 递归复制目录，排除指定文件夹（替代 rsync）
+ * 支持符号链接：保留链接结构（复制链接本身，不复制目标内容）
+ */
+async function copyDirRecursive(src, dest, excludeDirs) {
+    await mkdir(dest, { recursive: true });
+    const entries = await readdir(src, { withFileTypes: true });
+    for (const entry of entries) {
+        if (excludeDirs.has(entry.name))
+            continue;
+        const srcPath = join(src, entry.name);
+        const destPath = join(dest, entry.name);
+        try {
+            const lstatInfo = await lstat(srcPath);
+            if (lstatInfo.isSymbolicLink()) {
+                // 符号链接：读取链接目标并重新创建链接
+                const target = await readlink(srcPath);
+                await symlink(target, destPath);
+            }
+            else if (lstatInfo.isDirectory()) {
+                await copyDirRecursive(srcPath, destPath, excludeDirs);
+            }
+            else {
+                await copyFile(srcPath, destPath);
+            }
+        }
+        catch (e) {
+            // 跳过无法复制的文件（如权限不足），不中断整个复制过程
+            if (e.code !== 'EPERM' && e.code !== 'EBUSY')
+                throw e;
+        }
+    }
+}
+/**
+ * 对比两个目录的差异（替代 diff -rq）
+ */
+async function diffDirs(dir1, dir2, excludeDirs, base = '') {
+    let result = '';
+    const entries1 = await readdir(dir1, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries1) {
+        if (excludeDirs.has(entry.name))
+            continue;
+        const rel = base ? `${base}/${entry.name}` : entry.name;
+        const p1 = join(dir1, entry.name);
+        const p2 = join(dir2, entry.name);
+        const exists = await stat(p2).then(() => true).catch(() => false);
+        if (entry.isDirectory()) {
+            if (!exists) {
+                result += `Only in ${dir1}: ${entry.name}\n`;
+            }
+            else {
+                result += await diffDirs(p1, p2, excludeDirs, rel);
+            }
+        }
+        else {
+            if (!exists) {
+                result += `Only in ${dir1}: ${entry.name}\n`;
+            }
+        }
+    }
+    const entries2 = await readdir(dir2, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries2) {
+        if (excludeDirs.has(entry.name))
+            continue;
+        const rel = base ? `${base}/${entry.name}` : entry.name;
+        const p1 = join(dir1, entry.name);
+        const p2 = join(dir2, entry.name);
+        const exists = await stat(p1).then(() => true).catch(() => false);
+        if (!exists) {
+            if (entry.isDirectory()) {
+                result += `Only in ${dir2}: ${entry.name}\n`;
+            }
+            else {
+                result += `Only in ${dir2}: ${entry.name}\n`;
+            }
+        }
+    }
+    return result;
+}
 /**
  * 沙箱管理器
  *
@@ -33,8 +112,8 @@ export class SandboxManager {
         await mkdir(this.tempBase, { recursive: true });
         // mkdtemp 保证目录名唯一
         const sandboxPath = await mkdtemp(join(this.tempBase, `sandbox-${sandboxId}-`));
-        // 复制仓库（排除 .git；dist/build 仅排除项目构建产物，不能排除 node_modules/*/dist）
-        await execAsync(`rsync -a --exclude='.git' --exclude='/dist' --exclude='/build' ${this.sourcePath}/ ${sandboxPath}/`);
+        // 复制仓库（排除 .git、dist、build；包含 node_modules，符号链接已单独处理）
+        await copyDirRecursive(this.sourcePath, sandboxPath, new Set(['.git', 'dist', 'build']));
         // 在沙箱中初始化 git（支持 diff、commit 等操作）
         await execAsync('git init && git add -A && git commit -m "initial snapshot" --allow-empty', { cwd: sandboxPath });
         const sandbox = {
@@ -72,8 +151,9 @@ export class SandboxManager {
      */
     async getDiff(sandbox) {
         try {
-            const { stdout } = await execAsync(`diff -rq ${this.sourcePath} ${sandbox.path} --exclude=node_modules --exclude=.git --exclude=dist --exclude=build 2>/dev/null || true`);
-            return stdout;
+            // 用 Node.js 原生方式替代 diff -rq，兼容 Windows
+            const result = await diffDirs(this.sourcePath, sandbox.path, new Set(['node_modules', '.git', 'dist', 'build']));
+            return result;
         }
         catch {
             return '';
@@ -84,11 +164,12 @@ export class SandboxManager {
      * 复制文件后在源仓库中 git add + commit
      */
     async applyToSource(sandbox, files, commitMessage) {
-        // 1. 复制文件
+        // 1. 复制文件（用 Node.js 原生方式替代 cp 命令，兼容 Windows）
         for (const file of files) {
             const src = join(sandbox.path, file);
             const dest = join(this.sourcePath, file);
-            await execAsync(`cp "${src}" "${dest}"`);
+            await mkdir(join(dest, '..'), { recursive: true });
+            await copyFile(src, dest);
         }
         // 2. 在源仓库中提交
         if (commitMessage) {

@@ -43,7 +43,7 @@ TheHand/                          # 本平台（本仓库）
 ## 环境要求
 
 - Node.js >= 18
-- `rsync`（沙箱复制）
+- ~~`rsync`~~（已用 Node.js 原生实现替代，不再需要）
 - 豆包 / 火山方舟 OpenAI 兼容 API（或其它兼容端点）
 
 ## 快速开始
@@ -91,7 +91,7 @@ node cli-orchestrator.mjs "给 Popular Tags 前 5 个标签加视觉标识"
 脚本会：
 
 1. 自动 `npm run build` 编译 `core`
-2. 创建临时沙箱（`rsync` 自 `sandbox-repo`）
+2. 创建临时沙箱（Node.js 递归复制自 `sandbox-repo`，排除 node_modules 后在沙箱内重新 `npm install`）
 3. 跑完整 Orchestrator
 4. 在 `logs/` 写入运行日志
 
@@ -197,7 +197,7 @@ CLI 结束时会打印 Token 统计与预估成本（`¥`）。
 1. **不要**在 TheHand 仓库里提交 `sandbox-repo/`（已在 `.gitignore`）
 2. **不要**提交 `.env`
 3. Conduit 的 `package.json` / `vitest.config.js` 等测试配置变更，应在 **conduit 仓库** 内单独提交
-4. 若沙箱里 `npm test` 失败而本地通过，优先检查：rsync 是否排除了 `node_modules/*/dist`、Vitest 配置是否为 ESM
+4. 若沙箱里 `npm test` 失败而本地通过，优先检查：沙箱是否排除了 `node_modules/*/dist`、Vitest 配置是否为 ESM
 
 ## License
 
