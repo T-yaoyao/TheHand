@@ -40,8 +40,6 @@ export interface AgentContext {
     requirement: Requirement;
     projectContext: ProjectContext;
     memory: MemoryContext;
-    /** 沙箱路径，供工具读写文件时使用 */
-    sandboxPath?: string;
 }
 export interface MemoryContext {
     structuredRequirement: StructuredRequirement | null;

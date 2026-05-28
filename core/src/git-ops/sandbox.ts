@@ -1,7 +1,7 @@
 import { exec } from 'child_process'
 import { promisify } from 'util'
-import { mkdtemp, rm, cp, mkdir, readdir, stat, copyFile } from 'fs/promises'
-import { join, relative } from 'path'
+import { mkdtemp, rm, cp, mkdir, readdir, stat, copyFile, readlink, symlink } from 'fs/promises'
+import { join, relative, dirname } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
 
@@ -17,10 +17,22 @@ async function copyDirRecursive(src: string, dest: string, excludeDirs: Set<stri
     if (excludeDirs.has(entry.name)) continue
     const srcPath = join(src, entry.name)
     const destPath = join(dest, entry.name)
-    if (entry.isDirectory()) {
+    if (entry.isSymbolicLink()) {
+      // 重新创建符号链接（Windows junction/symlink 兼容）
+      const target = await readlink(srcPath)
+      await symlink(target, destPath)
+    } else if (entry.isDirectory()) {
       await copyDirRecursive(srcPath, destPath, excludeDirs)
     } else {
-      await copyFile(srcPath, destPath)
+      try {
+        await copyFile(srcPath, destPath)
+      } catch (e: any) {
+        if (e.code === 'EPERM' || e.code === 'EBUSY') {
+          // 跳过被锁定的文件（Windows 上 npm 的常见问题）
+          continue
+        }
+        throw e
+      }
     }
   }
 }
@@ -102,10 +114,11 @@ export class SandboxManager {
     // mkdtemp 保证目录名唯一
     const sandboxPath = await mkdtemp(join(this.tempBase, `sandbox-${sandboxId}-`))
 
-    // 复制仓库（排除 .git；dist/build 仅排除项目构建产物，不能排除 node_modules/*/dist）
-    await execAsync(
-      `rsync -a --exclude='.git' --exclude='/dist' --exclude='/build' ${this.sourcePath}/ ${sandboxPath}/`
-    )
+    // 复制仓库（排除 .git、dist/build 构建产物、node_modules）
+    await copyDirRecursive(this.sourcePath, sandboxPath, new Set(['.git', 'dist', 'build', 'node_modules']))
+
+    // 重新安装依赖
+    await execAsync('npm install --ignore-scripts', { cwd: sandboxPath })
 
     // 在沙箱中初始化 git（支持 diff、commit 等操作）
     await execAsync('git init && git add -A && git commit -m "initial snapshot" --allow-empty', { cwd: sandboxPath })
@@ -147,10 +160,7 @@ export class SandboxManager {
    */
   async getDiff(sandbox: Sandbox): Promise<string> {
     try {
-      const { stdout } = await execAsync(
-        `diff -rq ${this.sourcePath} ${sandbox.path} --exclude=node_modules --exclude=.git --exclude=dist --exclude=build 2>/dev/null || true`
-      )
-      return stdout
+      return await diffDirs(this.sourcePath, sandbox.path, new Set(['node_modules', '.git', 'dist', 'build']))
     } catch {
       return ''
     }
@@ -165,7 +175,8 @@ export class SandboxManager {
     for (const file of files) {
       const src = join(sandbox.path, file)
       const dest = join(this.sourcePath, file)
-      await execAsync(`cp "${src}" "${dest}"`)
+      await mkdir(dirname(dest), { recursive: true })
+      await copyFile(src, dest)
     }
 
     // 2. 在源仓库中提交

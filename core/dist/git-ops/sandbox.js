@@ -1,13 +1,12 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { mkdtemp, rm, mkdir, readdir, lstat, stat, copyFile, readlink, symlink } from 'fs/promises';
-import { join } from 'path';
+import { mkdtemp, rm, mkdir, readdir, stat, copyFile, readlink, symlink } from 'fs/promises';
+import { join, dirname } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 const execAsync = promisify(exec);
 /**
  * 递归复制目录，排除指定文件夹（替代 rsync）
- * 支持符号链接：保留链接结构（复制链接本身，不复制目标内容）
  */
 async function copyDirRecursive(src, dest, excludeDirs) {
     await mkdir(dest, { recursive: true });
@@ -17,24 +16,25 @@ async function copyDirRecursive(src, dest, excludeDirs) {
             continue;
         const srcPath = join(src, entry.name);
         const destPath = join(dest, entry.name);
-        try {
-            const lstatInfo = await lstat(srcPath);
-            if (lstatInfo.isSymbolicLink()) {
-                // 符号链接：读取链接目标并重新创建链接
-                const target = await readlink(srcPath);
-                await symlink(target, destPath);
-            }
-            else if (lstatInfo.isDirectory()) {
-                await copyDirRecursive(srcPath, destPath, excludeDirs);
-            }
-            else {
+        if (entry.isSymbolicLink()) {
+            // 重新创建符号链接（Windows junction/symlink 兼容）
+            const target = await readlink(srcPath);
+            await symlink(target, destPath);
+        }
+        else if (entry.isDirectory()) {
+            await copyDirRecursive(srcPath, destPath, excludeDirs);
+        }
+        else {
+            try {
                 await copyFile(srcPath, destPath);
             }
-        }
-        catch (e) {
-            // 跳过无法复制的文件（如权限不足），不中断整个复制过程
-            if (e.code !== 'EPERM' && e.code !== 'EBUSY')
+            catch (e) {
+                if (e.code === 'EPERM' || e.code === 'EBUSY') {
+                    // 跳过被锁定的文件（Windows 上 npm 的常见问题）
+                    continue;
+                }
                 throw e;
+            }
         }
     }
 }
@@ -112,8 +112,10 @@ export class SandboxManager {
         await mkdir(this.tempBase, { recursive: true });
         // mkdtemp 保证目录名唯一
         const sandboxPath = await mkdtemp(join(this.tempBase, `sandbox-${sandboxId}-`));
-        // 复制仓库（排除 .git、dist、build；包含 node_modules，符号链接已单独处理）
-        await copyDirRecursive(this.sourcePath, sandboxPath, new Set(['.git', 'dist', 'build']));
+        // 复制仓库（排除 .git、dist/build 构建产物、node_modules）
+        await copyDirRecursive(this.sourcePath, sandboxPath, new Set(['.git', 'dist', 'build', 'node_modules']));
+        // 重新安装依赖
+        await execAsync('npm install --ignore-scripts', { cwd: sandboxPath });
         // 在沙箱中初始化 git（支持 diff、commit 等操作）
         await execAsync('git init && git add -A && git commit -m "initial snapshot" --allow-empty', { cwd: sandboxPath });
         const sandbox = {
@@ -151,9 +153,7 @@ export class SandboxManager {
      */
     async getDiff(sandbox) {
         try {
-            // 用 Node.js 原生方式替代 diff -rq，兼容 Windows
-            const result = await diffDirs(this.sourcePath, sandbox.path, new Set(['node_modules', '.git', 'dist', 'build']));
-            return result;
+            return await diffDirs(this.sourcePath, sandbox.path, new Set(['node_modules', '.git', 'dist', 'build']));
         }
         catch {
             return '';
@@ -164,11 +164,11 @@ export class SandboxManager {
      * 复制文件后在源仓库中 git add + commit
      */
     async applyToSource(sandbox, files, commitMessage) {
-        // 1. 复制文件（用 Node.js 原生方式替代 cp 命令，兼容 Windows）
+        // 1. 复制文件
         for (const file of files) {
             const src = join(sandbox.path, file);
             const dest = join(this.sourcePath, file);
-            await mkdir(join(dest, '..'), { recursive: true });
+            await mkdir(dirname(dest), { recursive: true });
             await copyFile(src, dest);
         }
         // 2. 在源仓库中提交

@@ -12,6 +12,7 @@
     "lint": "eslint src/"
   },
   "dependencies": {
+    "@rollup/rollup-win32-x64-msvc": "^4.60.4",
     "zod": "^3.23.0"
   },
   "devDependencies": {
