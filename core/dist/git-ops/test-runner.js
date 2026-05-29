@@ -1,14 +1,14 @@
-import { exec } from 'child_process';
-import { promisify } from 'util';
-const execAsync = promisify(exec);
+import { createHostExecutor } from './executor.js';
 /**
  * 测试运行器：在沙箱中执行 lint 和单测
  * 不依赖 LLM，直接执行命令并解析结果
  */
 export class TestRunner {
     sandboxPath;
-    constructor(sandboxPath) {
+    executor;
+    constructor(sandboxPath, executor = createHostExecutor(sandboxPath)) {
         this.sandboxPath = sandboxPath;
+        this.executor = executor;
     }
     /**
      * 执行完整的测试流程：lint → test → (失败时) auto-fix → retry
@@ -57,11 +57,7 @@ export class TestRunner {
     async executeStep(name, command) {
         const startTime = Date.now();
         try {
-            const { stdout, stderr } = await execAsync(command, {
-                cwd: this.sandboxPath,
-                timeout: 120000,
-                maxBuffer: 1024 * 1024 * 10,
-            });
+            const { stdout, stderr } = await this.executor(command, { timeout: 120000 });
             return {
                 name,
                 passed: true,
