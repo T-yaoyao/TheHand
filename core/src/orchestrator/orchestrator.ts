@@ -55,6 +55,22 @@ export class Orchestrator {
   async *run(requirement: Requirement, projectId: string = 'conduit'): AsyncGenerator<OrchestratorEvent> {
     const { agentRunner, llmClient, promptManager, skillRegistry, sandboxManager, projectMemory, requirementMemory } = this.deps
 
+    // 加载对话历史，计算当前轮次并构建上下文
+    const recentConvs = await requirementMemory.getRecentConversations(requirement.id, 50)
+    const pmReplies = recentConvs.filter(c => c.role === 'pm')
+    const currentRound = 1 + pmReplies.length
+
+    // 构建 pmInput：第 1 轮用原始输入，后续轮次用 PM 回复拼接
+    let pmInput = requirement.pmInput
+    if (requirement.status === 'clarifying' && pmReplies.length > 0) {
+      pmInput = pmReplies.map(c => c.content).join('\n')
+    }
+
+    // 提取之前的澄清追问问题（用于给 LLM 提供上下文）
+    const previousQuestions = recentConvs
+      .filter(c => c.role === 'system')
+      .map(c => c.content)
+
     // 1. 创建沙箱
     yield { type: 'executing', phase: 'sandbox-create', progress: 0 }
     const sandbox = await sandboxManager.create(requirement.id)
@@ -78,16 +94,32 @@ export class Orchestrator {
       const clarificationResult = await runClarification(
         llmClient,
         promptManager,
-        requirement.pmInput,
+        pmInput,
         projectContext,
         requirement.structuredRequirement,
+        currentRound,
+        previousQuestions,
+        pmReplies.map(c => c.content),
       )
 
       if (clarificationResult.needsMoreInfo) {
+        // 将追问问题保存为 system 类型对话，让前端 Chat Tab 能显示
+        const questions = clarificationResult.questions ?? []
+        for (const q of questions) {
+          await requirementMemory.addConversation({
+            id: crypto.randomUUID(),
+            requirementId: requirement.id,
+            role: 'system',
+            content: q,
+            round: clarificationResult.round,
+            createdAt: new Date(),
+          })
+        }
+
         yield {
           type: 'waiting-for-pm',
           requirement: { ...requirement, status: 'clarifying' },
-          questions: clarificationResult.questions ?? [],
+          questions,
         }
         requirement.status = 'clarifying'
         requirement.structuredRequirement = clarificationResult.requirement
@@ -112,13 +144,22 @@ export class Orchestrator {
       const planResult = await agentRunner.run(createPlanAgent(), planContext)
 
       if (planResult.status === 'failed' || !planResult.output) {
-        yield { type: 'failed', requirement, error: '方案 Agent 执行失败' }
+        const detail = planResult.status === 'failed'
+          ? `循环耗尽(${planResult.inputTokens}/${planResult.outputTokens} tokens)`
+          : `输出为空 (type=${typeof planResult.output}, value=${JSON.stringify(planResult.output)?.slice(0, 200)})`
+        yield { type: 'failed', requirement, error: `方案 Agent 执行失败: ${detail}` }
         requirement.status = 'failed'
         await requirementMemory.saveRequirement(requirement)
         return
       }
 
       const plan = this.parsePlan(planResult.output)
+      if (plan.length === 0) {
+        yield { type: 'failed', requirement, error: '方案解析为空，LLM 输出未包含有效文件列表' }
+        requirement.status = 'failed'
+        await requirementMemory.saveRequirement(requirement)
+        return
+      }
       requirement.plan = plan
       requirement.status = 'plan-approved'
       await requirementMemory.saveRequirement(requirement)
@@ -151,12 +192,12 @@ export class Orchestrator {
         }
 
         yield { type: 'executing', phase: 'coding-agent', progress: 30 }
-        codeOutputs = await runCoding(llmClient, promptManager, planFiles, sandbox.path)
+        codeOutputs = await runCoding(llmClient, promptManager, planFiles, sandbox.path, projectContext)
       }
 
-      // 写入文件到沙箱
+      // 写入文件到沙箱（__DELETE__ 标记的文件执行删除）
       yield { type: 'executing', phase: 'writing-files', progress: 60 }
-      const { writeFile, mkdir } = await import('fs/promises')
+      const { writeFile, mkdir, rm } = await import('fs/promises')
       const { dirname, join } = await import('path')
 
       const validOutputs = codeOutputs.filter(f => f.path && f.content)
@@ -169,20 +210,30 @@ export class Orchestrator {
 
       for (const file of validOutputs) {
         const fullPath = join(sandbox.path, file.path)
-        await mkdir(dirname(fullPath), { recursive: true })
-        await writeFile(fullPath, file.content, 'utf-8')
-        yield { type: 'executing', phase: `wrote: ${file.path}`, progress: 60 }
+        if (file.content.trim().includes('__DELETE__')) {
+          try {
+            await rm(fullPath, { force: true })
+            yield { type: 'executing', phase: `deleted: ${file.path}`, progress: 60 }
+          } catch {
+            yield { type: 'executing', phase: `delete skipped: ${file.path} (not found)`, progress: 60 }
+          }
+        } else {
+          await mkdir(dirname(fullPath), { recursive: true })
+          await writeFile(fullPath, file.content, 'utf-8')
+          yield { type: 'executing', phase: `wrote: ${file.path}`, progress: 60 }
+        }
       }
 
-      // 6. 测试阶段 — 直接执行 lint/test，不依赖 LLM
+      // 6. 测试阶段 — 直接执行 lint/build/test，不依赖 LLM
       yield { type: 'status-change', status: 'testing', agent: 'test' }
       yield { type: 'executing', phase: 'running-tests', progress: 70 }
 
-      const commands = projectContext.commands ?? { lint: 'npm run lint', test: 'npm test' }
+      const commands = projectContext.commands?.lint ? projectContext.commands : { lint: 'npm run lint', test: 'npm test', build: 'npm run build' }
 
       const testResult = await testRunner.run({
         lint: commands.lint,
         test: commands.test,
+        build: commands.build,
       })
 
       yield {
@@ -219,12 +270,18 @@ export class Orchestrator {
 
       // 8. 提交代码到沙箱 git
       yield { type: 'executing', phase: 'committing', progress: 90 }
-      const commitMsg = `feat: ${requirement.structuredRequirement?.description ?? requirement.pmInput}`
+      const rawCommitMsg = `feat: ${requirement.structuredRequirement?.description ?? requirement.pmInput}`
+      const commitMsg = rawCommitMsg.replace(/[`$"]/g, "'").slice(0, 200)
       try {
         await repoManager.commit(commitMsg)
         yield { type: 'executing', phase: 'committed to sandbox', progress: 95 }
       } catch (e: any) {
         yield { type: 'executing', phase: `commit failed: ${e.message}`, progress: 95 }
+        // 沙箱 commit 失败，不继续 apply 到源仓库
+        requirement.status = 'done'
+        await requirementMemory.saveRequirement(requirement)
+        yield { type: 'completed', requirement }
+        return
       }
 
       // 9. 将沙箱变更应用回源仓库（含 git commit）
@@ -240,7 +297,7 @@ export class Orchestrator {
       // 10. 完成
       requirement.status = 'done'
       await requirementMemory.saveRequirement(requirement)
-      yield { type: 'completed', requirement, sandboxPath: sandbox.path }
+      yield { type: 'completed', requirement }
 
     } catch (e: any) {
       yield { type: 'failed', requirement, error: e.message }

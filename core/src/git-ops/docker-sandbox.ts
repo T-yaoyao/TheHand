@@ -1,9 +1,10 @@
 import { exec } from 'child_process'
 import { promisify } from 'util'
-import { mkdtemp, rm, mkdir } from 'fs/promises'
+import { mkdtemp, rm, mkdir, cp, readdir } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
+import { fileURLToPath } from 'url'
 import type { Sandbox } from './sandbox.js'
 import type { CommandExecutor } from './executor.js'
 
@@ -94,23 +95,30 @@ export class DockerSandboxManager {
   getExecutor(sandbox: Sandbox): CommandExecutor {
     const entry = this.findEntry(sandbox)
     if (!entry) throw new Error('Sandbox not tracked')
-    return (command, options) =>
-      this.dockerExec(entry.containerName, command, options?.timeout).then(r => ({
-        stdout: r.stdout,
-        stderr: r.stderr,
-      }))
+    return async (command, options) => {
+      const r = await this.dockerExec(entry.containerName, command, options?.timeout)
+      if (r.exitCode !== 0) {
+        const err: any = new Error(`Command failed (exit ${r.exitCode}): ${command.slice(0, 100)}`)
+        err.stdout = r.stdout
+        err.stderr = r.stderr
+        err.code = r.exitCode
+        throw err
+      }
+      return { stdout: r.stdout, stderr: r.stderr }
+    }
   }
 
   async applyToSource(sandbox: Sandbox, files: string[], commitMessage?: string): Promise<void> {
     for (const file of files) {
       const src = join(sandbox.path, file)
       const dest = join(this.sourcePath, file)
-      await execAsync(`cp "${src}" "${dest}"`)
+      await mkdir(join(dest, '..'), { recursive: true })
+      await cp(src, dest, { recursive: true })
     }
     if (commitMessage) {
       try {
         await execAsync('git add -A', { cwd: this.sourcePath })
-        await execAsync(`git commit -m "${commitMessage.replace(/"/g, '\\"')}"`, { cwd: this.sourcePath })
+        await execAsync(`git commit -m '${commitMessage.replace(/'/g, "'\\''")}'`, { cwd: this.sourcePath })
       } catch (e: any) {
         if (!e.message?.includes('nothing to commit')) throw e
       }
@@ -150,7 +158,7 @@ export class DockerSandboxManager {
       return
     } catch {}
     // Dockerfile 在 src/git-ops/ 目录，编译后 import.meta.url 指向 dist/git-ops/
-    const distDir = new URL('.', import.meta.url).pathname
+    const distDir = fileURLToPath(new URL('.', import.meta.url))
     const srcDir = join(distDir, '../../src/git-ops')
     await execAsync(`docker build -t ${this.image} -f ${join(srcDir, 'sandbox.Dockerfile')} ${srcDir}`, {
       timeout: 120_000,
@@ -159,9 +167,14 @@ export class DockerSandboxManager {
   }
 
   private async copySource(src: string, dest: string): Promise<void> {
-    await execAsync(
-      `cd "${src}" && find . -maxdepth 1 -not -name '.git' -not -name '.' -not -name 'dist' -not -name 'build' | xargs -I{} cp -a "{}" "${dest}/"`,
-    )
+    const exclude = new Set(['.git', 'dist', 'build', 'node_modules'])
+    const entries = await readdir(src, { withFileTypes: true })
+    for (const entry of entries) {
+      if (exclude.has(entry.name)) continue
+      const srcPath = join(src, entry.name)
+      const destPath = join(dest, entry.name)
+      await cp(srcPath, destPath, { recursive: true, dereference: true })
+    }
   }
 
   private async dockerExec(

@@ -7,6 +7,9 @@ export function PlanView({ plan }: { plan: FilePlan[] | null }) {
 
   return (
     <div className="plan-list">
+      <div className="plan-summary">
+        本次变更涉及 <strong>{plan.length}</strong> 个文件
+      </div>
       {plan.map((file, i) => (
         <article key={file.path} className="plan-card">
           <div className="plan-card-head">

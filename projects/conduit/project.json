@@ -58,5 +58,11 @@
     "test": "npm test -- --run",
     "dev": "npm run dev",
     "build": "npm run build"
+  },
+  "constraints": {
+    "routing": "路由在 frontend/src/main.jsx 中用 <Route> 内联定义，不要创建 routes/index.jsx 等独立路由文件",
+    "components": "组件目录结构为 ComponentName/ComponentName.jsx + ComponentName/index.js（re-export），不要创建新的 index.jsx",
+    "dependencies": "前端只用 react、react-router-dom、axios，不要引入 antd、material-ui 等未安装的 UI 库",
+    "modification": "修改已有组件时只改需要改的部分，不要整体重写组件"
   }
 }

@@ -121,7 +121,7 @@ export class RepoManager {
    */
   async commit(message: string): Promise<CommitResult> {
     await this.stageAll()
-    await this.executor(`git commit -m "${message.replace(/"/g, '\\"')}"`)
+    await this.executor(`git commit -m '${message.replace(/'/g, "'\\''")}'`)
     const { stdout } = await this.executor('git rev-parse --short HEAD')
     return { hash: stdout.trim(), message }
   }

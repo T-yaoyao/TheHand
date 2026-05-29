@@ -28,7 +28,7 @@ export class TestRunner {
    * 执行完整的测试流程：lint → test → (失败时) auto-fix → retry
    * lint 作为非阻塞检查（warnings 不阻断），test 作为阻塞检查
    */
-  async run(commands: { lint: string; test: string }, maxFixAttempts: number = 3): Promise<TestRunResult> {
+  async run(commands: { lint: string; test: string; build?: string }, maxFixAttempts: number = 3): Promise<TestRunResult> {
     const steps: TestStepResult[] = []
     let fixAttempts = 0
 
@@ -36,7 +36,16 @@ export class TestRunner {
     const lintResult = await this.executeStep('lint', commands.lint)
     steps.push(lintResult)
 
-    // Step 2: Test（阻塞，test 必须通过）
+    // Step 2: Build（阻塞，验证代码可编译/解析）
+    if (commands.build) {
+      const buildResult = await this.executeStep('build', commands.build)
+      steps.push(buildResult)
+      if (!buildResult.passed) {
+        return { passed: false, steps, fixAttempts }
+      }
+    }
+
+    // Step 3: Test（阻塞，test 必须通过）
     const testResult = await this.executeStep('unit-test', commands.test)
     steps.push(testResult)
 

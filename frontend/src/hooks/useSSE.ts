@@ -21,6 +21,8 @@ export function useSSE(requirementId: string | null) {
   const [connected, setConnected] = useState(false)
   const [latestEvent, setLatestEvent] = useState<OrchestratorEvent | null>(null)
   const sourceRef = useRef<EventSource | null>(null)
+  const errorCountRef = useRef(0)
+  const [reconnectKey, setReconnectKey] = useState(0)
 
   useEffect(() => {
     if (!requirementId) {
@@ -30,10 +32,20 @@ export function useSSE(requirementId: string | null) {
       return
     }
 
+    // 清理旧连接
+    if (sourceRef.current) {
+      sourceRef.current.close()
+      sourceRef.current = null
+    }
+
+    errorCountRef.current = 0
     const source = new EventSource(`/api/events/${requirementId}`)
     sourceRef.current = source
 
-    source.onopen = () => setConnected(true)
+    source.onopen = () => {
+      setConnected(true)
+      errorCountRef.current = 0
+    }
 
     source.onmessage = (e) => {
       try {
@@ -48,18 +60,35 @@ export function useSSE(requirementId: string | null) {
 
     source.onerror = () => {
       setConnected(false)
+      errorCountRef.current++
+      // 连续错误超过 5 次，关闭连接（避免 404 无限重连）
+      if (errorCountRef.current > 5) {
+        source.close()
+        sourceRef.current = null
+      }
     }
 
     return () => {
       source.close()
-      sourceRef.current = null
+      if (sourceRef.current === source) {
+        sourceRef.current = null
+      }
     }
-  }, [requirementId])
+  }, [requirementId, reconnectKey])
 
   const clearEvents = useCallback(() => {
     setEvents([])
     setLatestEvent(null)
   }, [])
 
-  return { events, connected, latestEvent, clearEvents }
+  const reconnect = useCallback(() => {
+    if (sourceRef.current) {
+      sourceRef.current.close()
+      sourceRef.current = null
+    }
+    errorCountRef.current = 0
+    setReconnectKey((k) => k + 1)
+  }, [])
+
+  return { events, connected, latestEvent, clearEvents, reconnect }
 }

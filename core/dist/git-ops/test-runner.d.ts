@@ -25,6 +25,7 @@ export declare class TestRunner {
     run(commands: {
         lint: string;
         test: string;
+        build?: string;
     }, maxFixAttempts?: number): Promise<TestRunResult>;
     /**
      * 执行单个测试步骤

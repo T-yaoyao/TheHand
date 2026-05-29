@@ -19,8 +19,13 @@ try {
     if (idx === -1) continue
     const key = trimmed.slice(0, idx).trim()
     let val = trimmed.slice(idx + 1).trim()
-    const commentIdx = val.indexOf('  #')
+    // 去除行内注释（# 前至少一个空格）
+    const commentIdx = val.indexOf(' #')
     if (commentIdx !== -1) val = val.slice(0, commentIdx).trim()
+    // 去除首尾引号
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1)
+    }
     process.env[key] = val
   }
 } catch {}

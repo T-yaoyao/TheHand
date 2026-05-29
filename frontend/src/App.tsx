@@ -18,13 +18,22 @@ export function App() {
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [newInput, setNewInput] = useState('')
   const [chatInput, setChatInput] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [sending, setSending] = useState(false)
   const [running, setRunning] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [loadingList, setLoadingList] = useState(true)
   const [tab, setTab] = useState<Tab>('progress')
   const [toast, setToast] = useState<{ type: 'error' | 'success'; msg: string } | null>(null)
+  const [errorBanner, setErrorBanner] = useState<string | null>(null)
+  const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null)
+  const [thinking, setThinking] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const selectedRef = useRef<Requirement | null>(null)
+  selectedRef.current = selected
 
-  const { events, connected, latestEvent, clearEvents } = useSSE(selected?.id ?? null)
+  const { events, connected, latestEvent, clearEvents, reconnect } = useSSE(selected?.id ?? null)
 
   const showToast = useCallback((type: 'error' | 'success', msg: string) => {
     setToast({ type, msg })
@@ -35,14 +44,18 @@ export function App() {
     try {
       const list = await api.getRequirements()
       setRequirements(list)
-      if (selected) {
-        const updated = list.find((r) => r.id === selected.id)
+      setLoadingList(false)
+      setErrorBanner(null)
+      const current = selectedRef.current
+      if (current) {
+        const updated = list.find((r) => r.id === current.id)
         if (updated) setSelected(updated)
       }
     } catch (e: unknown) {
-      showToast('error', e instanceof Error ? e.message : '加载失败')
+      setLoadingList(false)
+      setErrorBanner(e instanceof Error ? e.message : '后端服务不可用，请检查后端是否启动')
     }
-  }, [selected, showToast])
+  }, [])
 
   useEffect(() => {
     refreshList()
@@ -52,66 +65,82 @@ export function App() {
     if (selected) {
       api.getConversations(selected.id).then(setConversations).catch(() => setConversations([]))
       clearEvents()
-      setTab('progress')
+      setTab('chat')
     }
   }, [selected?.id, clearEvents])
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [conversations, tab])
+  }, [conversations, tab, thinking])
 
   useEffect(() => {
     if (!latestEvent || !selected) return
     if (latestEvent.type === 'plan-ready') setTab('plan')
-    if (latestEvent.type === 'waiting-for-pm') setTab('chat')
-    if (
-      latestEvent.type === 'status-change' ||
-      latestEvent.type === 'completed' ||
-      latestEvent.type === 'failed'
-    ) {
+    if (latestEvent.type === 'waiting-for-pm') {
+      setTab('chat')
+      setThinking(false)
+      api.getConversations(selected.id).then(setConversations).catch(() => {})
+    }
+    if (latestEvent.type === 'status-change' || latestEvent.type === 'completed' || latestEvent.type === 'failed') {
       refreshList()
+      setThinking(false)
     }
   }, [latestEvent, selected, refreshList])
 
   const handleCreate = async () => {
     if (!newInput.trim()) return
-    setLoading(true)
+    setCreating(true)
     try {
       const req = await api.createRequirement(newInput.trim())
       setRequirements((prev) => [req, ...prev])
       setSelected(req)
       setNewInput('')
-      showToast('success', '需求已创建')
+      showToast('success', '需求已提交')
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : '创建失败')
     } finally {
-      setLoading(false)
+      setCreating(false)
     }
   }
 
   const handleSend = async () => {
     if (!chatInput.trim() || !selected) return
-    setLoading(true)
+    setSending(true)
+    setThinking(true)
     try {
       await api.addConversation(selected.id, 'pm', chatInput.trim())
       const convs = await api.getConversations(selected.id)
       setConversations(convs)
       setChatInput('')
+      refreshList()
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : '发送失败')
+      setThinking(false)
     } finally {
-      setLoading(false)
+      setSending(false)
     }
   }
 
   const handleRun = async () => {
     if (!selected) return
+    if (selected.status === 'done' || selected.status === 'failed') {
+      setConfirmDialog({
+        message: `当前需求状态为"${selected.status === 'done' ? '已完成' : '已失败'}"，确定要重新运行？`,
+        onConfirm: () => doRun(),
+      })
+      return
+    }
+    doRun()
+  }
+
+  const doRun = async () => {
+    setConfirmDialog(null)
     setRunning(true)
     clearEvents()
     try {
       setTab('progress')
-      await api.runOrchestrator(selected.id)
-      showToast('success', '流水线已在后端启动，请查看进度 Tab')
+      await api.runOrchestrator(selected!.id)
+      showToast('success', '流水线已启动')
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : '触发失败')
     } finally {
@@ -120,53 +149,91 @@ export function App() {
   }
 
   const handleDelete = async () => {
-    if (!selected || !confirm('确定删除该需求？')) return
-    try {
-      await api.deleteRequirement(selected.id)
-      setRequirements((prev) => prev.filter((r) => r.id !== selected.id))
-      setSelected(null)
-      showToast('success', '已删除')
-    } catch (e: unknown) {
-      showToast('error', e instanceof Error ? e.message : '删除失败')
-    }
+    if (!selected) return
+    setConfirmDialog({
+      message: `确定删除需求"${selected.pm_input.slice(0, 30)}…"？`,
+      onConfirm: async () => {
+        setConfirmDialog(null)
+        setDeleting(true)
+        try {
+          await api.deleteRequirement(selected.id)
+          setRequirements((prev) => prev.filter((r) => r.id !== selected.id))
+          setSelected(null)
+          showToast('success', '已删除')
+        } catch (e: unknown) {
+          showToast('error', e instanceof Error ? e.message : '删除失败')
+        } finally {
+          setDeleting(false)
+        }
+      },
+    })
   }
 
   const plan = parseJsonField<FilePlan[]>(selected?.plan ?? null)
   const structured = parseJsonField<unknown>(selected?.structured_requirement ?? null)
   const livePlan = latestEvent?.type === 'plan-ready' ? latestEvent.plan : null
 
+  const canReply = selected?.status === 'clarifying' || selected?.status === 'waiting-for-pm'
+  const isRunning = ['clarifying', 'clarified', 'planning', 'coding', 'testing'].includes(selected?.status ?? '')
+  const showRunButton = !isRunning || selected?.status === 'clarified'
+  const runButtonText = running ? '运行中…' : (selected?.status === 'done' || selected?.status === 'failed') ? '重新运行' : '运行流水线'
+
+  const filteredRequirements = searchQuery
+    ? requirements.filter(r => r.pm_input.toLowerCase().includes(searchQuery.toLowerCase()))
+    : requirements
+
   return (
     <div className="app-layout">
       <Sidebar
-        requirements={requirements}
+        requirements={filteredRequirements}
         selectedId={selected?.id ?? null}
         newInput={newInput}
-        loading={loading}
+        loading={creating}
         onNewInputChange={setNewInput}
         onCreate={handleCreate}
         onSelect={setSelected}
         onRefresh={refreshList}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
       />
 
       <main className="main">
+        {errorBanner && (
+          <div className="error-banner">
+            {errorBanner}
+            <button type="button" onClick={() => { setErrorBanner(null); refreshList() }}>重试</button>
+          </div>
+        )}
+
         {!selected ? (
           <div className="main-empty">
             <h2>TheHand</h2>
             <p>用自然语言描述需求，自动完成澄清、方案、编码与测试。开发者在 GitHub 上 Review PR 即可。</p>
-            <div className="features">
-              <div className="feature-card">
-                <strong>澄清</strong>
-                <span>识别歧义，输出结构化需求</span>
+            {loadingList ? (
+              <div className="skeleton-list">
+                <div className="skeleton-item" /><div className="skeleton-item" /><div className="skeleton-item" />
               </div>
-              <div className="feature-card">
-                <strong>方案</strong>
-                <span>定位文件，生成变更说明</span>
-              </div>
-              <div className="feature-card">
-                <strong>交付</strong>
-                <span>沙箱编码、lint、单测后提交</span>
-              </div>
-            </div>
+            ) : (
+              <>
+                <div className="features">
+                  <div className="feature-card">
+                    <strong>澄清</strong>
+                    <span>识别歧义，输出结构化需求</span>
+                  </div>
+                  <div className="feature-card">
+                    <strong>方案</strong>
+                    <span>定位文件，生成变更说明</span>
+                  </div>
+                  <div className="feature-card">
+                    <strong>交付</strong>
+                    <span>沙箱编码、lint、单测后提交</span>
+                  </div>
+                </div>
+                {requirements.length === 0 && (
+                  <p className="empty-guide">在左侧输入你的第一个需求，按 Enter 开始</p>
+                )}
+              </>
+            )}
           </div>
         ) : (
           <>
@@ -174,27 +241,27 @@ export function App() {
               <h2>{selected.pm_input}</h2>
               <div className="detail-actions">
                 <StatusBadge status={selected.status} />
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={handleRun}
-                  disabled={running}
-                >
-                  {running ? '运行中…' : '▶ 运行流水线'}
-                </button>
-                <button type="button" className="btn-danger" onClick={handleDelete}>
-                  删除
+                {showRunButton && (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={handleRun}
+                    disabled={running}
+                  >
+                    {runButtonText}
+                  </button>
+                )}
+                <button type="button" className="btn-danger" onClick={handleDelete} disabled={deleting}>
+                  {deleting ? '删除中…' : '删除'}
                 </button>
               </div>
             </header>
 
             <div className="banner">
-              点击「运行流水线」将在后端启动 Orchestrator（需配置根目录 <code>.env</code>）。
-              请先打开本需求的「进度」Tab 以接收实时 SSE；也可使用{' '}
-              <code>node cli-orchestrator.mjs</code> 在终端运行。
+              提交需求后，系统将自动分析需求、生成代码方案、编码并测试。你可以随时在下方对话中回复澄清问题。
             </div>
 
-            <nav className="tabs">
+            <nav className="tabs" role="tablist">
               {(
                 [
                   ['progress', '进度'],
@@ -206,6 +273,8 @@ export function App() {
                 <button
                   key={key}
                   type="button"
+                  role="tab"
+                  aria-selected={tab === key}
                   className={`tab ${tab === key ? 'tab-active' : ''}`}
                   onClick={() => setTab(key)}
                 >
@@ -221,57 +290,101 @@ export function App() {
                   latestEvent={latestEvent}
                   connected={connected}
                   requirementStatus={selected.status}
+                  onReconnect={reconnect}
                 />
               )}
 
               {tab === 'chat' && (
-                <div className="messages">
-                  {conversations.length === 0 ? (
+                <div className="messages" aria-live="polite">
+                  {conversations.length === 0 && !thinking ? (
                     <p className="empty-panel">暂无对话。澄清阶段的问题与回复将显示在这里。</p>
                   ) : (
-                    conversations.map((conv) => (
-                      <div
-                        key={conv.id}
-                        className={`message ${conv.role === 'pm' ? 'message-pm' : 'message-system'}`}
-                      >
-                        <div className="message-role">{conv.role === 'pm' ? 'PM' : '系统'}</div>
-                        <div className="message-bubble">{conv.content}</div>
-                      </div>
-                    ))
+                    <>
+                      {conversations.map((conv) => (
+                        <div
+                          key={conv.id}
+                          className={`message ${conv.role === 'pm' ? 'message-pm' : 'message-system'}`}
+                        >
+                          <div className="message-header">
+                            <span className="message-role">{conv.role === 'pm' ? 'PM' : '系统'}</span>
+                            <span className="message-time">{new Date(conv.created_at).toLocaleTimeString()}</span>
+                          </div>
+                          <div className="message-bubble">{conv.content}</div>
+                        </div>
+                      ))}
+                      {thinking && (
+                        <div className="message message-system">
+                          <div className="message-header">
+                            <span className="message-role">系统</span>
+                          </div>
+                          <div className="message-bubble thinking">
+                            <span className="thinking-dot" /><span className="thinking-dot" /><span className="thinking-dot" />
+                            正在分析…
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
                   <div ref={chatEndRef} />
                 </div>
               )}
 
-              {tab === 'plan' && <PlanView plan={(livePlan as FilePlan[] | undefined) ?? plan} />}
+              {tab === 'plan' && (
+                <div>
+                  <PlanView plan={(livePlan as FilePlan[] | undefined) ?? plan} />
+                  {(selected.status === 'plan-approved' || latestEvent?.type === 'plan-ready') && (
+                    <div className="plan-actions">
+                      <button type="button" className="btn-primary" onClick={() => {
+                        showToast('success', '方案已确认，开始编码')
+                        // 编码已由 orchestrator 自动推进
+                      }}>
+                        确认方案
+                      </button>
+                      <button type="button" className="btn-secondary" onClick={() => {
+                        showToast('success', '方案已驳回，请修改需求后重新运行')
+                      }}>
+                        驳回方案
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {tab === 'detail' && <StructuredView data={structured} />}
             </div>
 
             {tab === 'chat' && (
               <div className="chat-compose">
-                <textarea
-                  className="textarea"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault()
-                      handleSend()
-                    }
-                  }}
-                  placeholder="回复澄清问题…"
-                  rows={2}
-                />
-                <button
-                  type="button"
-                  className="btn-primary"
-                  style={{ width: 'auto', marginTop: 0 }}
-                  onClick={handleSend}
-                  disabled={loading || !chatInput.trim()}
-                >
-                  发送
-                </button>
+                {canReply ? (
+                  <>
+                    <textarea
+                      className="textarea"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault()
+                          handleSend()
+                        }
+                      }}
+                      placeholder="回复澄清问题…"
+                      rows={2}
+                    />
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      style={{ width: 'auto', marginTop: 0 }}
+                      onClick={handleSend}
+                      disabled={sending || !chatInput.trim()}
+                    >
+                      {sending ? '发送中…' : '发送'}
+                    </button>
+                  </>
+                ) : (
+                  <p className="chat-hint">
+                    {isRunning ? '系统正在处理中，暂无需回复' : '当前阶段无需回复'}
+                  </p>
+                )}
               </div>
             )}
           </>
@@ -279,6 +392,18 @@ export function App() {
       </main>
 
       {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
+
+      {confirmDialog && (
+        <div className="modal-overlay" onClick={() => setConfirmDialog(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <p>{confirmDialog.message}</p>
+            <div className="modal-actions">
+              <button type="button" className="btn-primary" onClick={confirmDialog.onConfirm}>确定</button>
+              <button type="button" className="btn-secondary" onClick={() => setConfirmDialog(null)}>取消</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

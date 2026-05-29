@@ -14,6 +14,7 @@ interface StatusFlowProps {
   latestEvent: OrchestratorEvent | null
   connected: boolean
   requirementStatus: string
+  onReconnect?: () => void
 }
 
 function deriveStatus(latest: OrchestratorEvent | null, fallback: string): string {
@@ -32,10 +33,10 @@ function stepIndex(status: string): number {
     if (PIPELINE[i].keys.includes(status)) return i
   }
   if (status === 'idle') return -1
-  return 0
+  return -1
 }
 
-export function StatusFlow({ events, latestEvent, connected, requirementStatus }: StatusFlowProps) {
+export function StatusFlow({ events, latestEvent, connected, requirementStatus, onReconnect }: StatusFlowProps) {
   const current = deriveStatus(latestEvent, requirementStatus)
   const activeIdx = stepIndex(current)
   const isFailed = latestEvent?.type === 'failed' || current === 'failed'
@@ -47,8 +48,10 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus }
       <div className="status-flow-top">
         <span className={`conn-dot ${connected ? 'conn-on' : ''}`} />
         <span className="conn-text">{connected ? 'SSE 已连接' : 'SSE 未连接'}</span>
-        {!connected && (
-          <span className="conn-hint">运行流水线后将显示实时进度（需后端推送事件）</span>
+        {!connected && onReconnect && (
+          <button type="button" className="btn-ghost btn-sm" onClick={onReconnect}>
+            重新连接
+          </button>
         )}
       </div>
 
@@ -60,7 +63,7 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus }
           return (
             <div key={step.label} className="pipeline-step">
               <div
-                className={`pipeline-icon ${done ? 'done' : ''} ${active ? 'active' : ''} ${failed ? 'failed' : ''}`}
+                className={`pipeline-icon ${done ? 'done' : ''} ${active ? 'active' : ''} ${failed ? 'failed' : ''} ${active && !failed ? 'pulse' : ''}`}
               >
                 {done ? '✓' : i + 1}
               </div>
@@ -71,30 +74,26 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus }
         })}
       </div>
 
-      {phase && (
+      {(phase || activeIdx >= 0) && (
         <div className="phase-row">
-          <span className="muted">当前</span>
-          <code>{phase}</code>
-          {progress > 0 && <span className="muted">{progress}%</span>}
+          {phase ? (
+            <>
+              <span className="muted">当前</span>
+              <code>{phase}</code>
+              {progress > 0 && <span className="muted">{progress}%</span>}
+            </>
+          ) : (
+            <span className="muted">处理中…</span>
+          )}
         </div>
       )}
 
-      {progress > 0 && (
-        <div className="progress-track">
-          <div className="progress-fill" style={{ width: `${Math.min(progress, 100)}%` }} />
-        </div>
-      )}
-
-      {latestEvent?.type === 'waiting-for-pm' && latestEvent.questions && (
-        <div className="alert alert-warn">
-          <strong>需要 PM 澄清</strong>
-          <ul>
-            {latestEvent.questions.map((q, i) => (
-              <li key={i}>{q}</li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <div className="progress-track">
+        <div
+          className={`progress-fill ${activeIdx >= 0 && !progress ? 'progress-animated' : ''}`}
+          style={{ width: progress > 0 ? `${Math.min(progress, 100)}%` : activeIdx >= 0 ? '30%' : '0%' }}
+        />
+      </div>
 
       {latestEvent?.type === 'plan-ready' && latestEvent.plan && (
         <div className="alert alert-info">
@@ -111,7 +110,7 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus }
 
       {latestEvent?.type === 'test-result' && (
         <div className={`alert ${latestEvent.passed ? 'alert-success' : 'alert-error'}`}>
-          {latestEvent.passed ? '✓ 测试通过' : '✗ 测试失败'}
+          {latestEvent.passed ? '测试通过' : '测试失败'}
         </div>
       )}
 
@@ -119,18 +118,23 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus }
         <div className="alert alert-error">
           <strong>失败</strong>
           <p>{latestEvent.error}</p>
+          {onReconnect && (
+            <button type="button" className="btn-secondary btn-sm" onClick={onReconnect} style={{ marginTop: 8 }}>
+              重试
+            </button>
+          )}
         </div>
       )}
 
       {latestEvent?.type === 'completed' && (
         <div className="alert alert-success">
-          <strong>✓ 需求已完成</strong>
+          <strong>需求已完成</strong>
         </div>
       )}
 
       {events.length > 0 && (
         <details className="event-log">
-          <summary>事件日志 ({events.length})</summary>
+          <summary>调试日志（开发者）</summary>
           <div className="event-log-list">
             {[...events].reverse().slice(0, 20).map((ev, i) => (
               <div key={i} className="event-log-item">

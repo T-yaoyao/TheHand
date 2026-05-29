@@ -34,6 +34,8 @@ export async function runClarification(
   projectContext: any,
   currentRequirement?: StructuredRequirement | null,
   round: number = 1,
+  previousQuestions: string[] = [],
+  pmReplies: string[] = [],
 ): Promise<ClarificationResult> {
   // 加载 prompt 模板
   const systemPrompt = await promptManager.load('clarification')
@@ -44,9 +46,29 @@ export async function runClarification(
     userMessage = `当前结构化需求：\n${JSON.stringify(currentRequirement, null, 2)}\n\nPM 新回复：${pmInput}`
   }
 
+  // 注入之前的澄清对话历史，让 LLM 知道之前问了什么、PM 怎么答的
+  if (previousQuestions.length > 0) {
+    const historyLines: string[] = ['\n\n## 之前的澄清对话']
+    const maxPairs = Math.min(previousQuestions.length, pmReplies.length)
+    for (let i = 0; i < maxPairs; i++) {
+      historyLines.push(`追问 ${i + 1}: ${previousQuestions[i]}`)
+      historyLines.push(`PM 回复 ${i + 1}: ${pmReplies[i]}`)
+    }
+    for (let i = maxPairs; i < previousQuestions.length; i++) {
+      historyLines.push(`追问 ${i + 1}: ${previousQuestions[i]}`)
+      historyLines.push(`PM 回复 ${i + 1}: （未回复）`)
+    }
+    userMessage += historyLines.join('\n')
+  }
+
   // 如果有项目上下文，注入模型信息
   if (projectContext?.models) {
     userMessage += `\n\n项目模型定义：\n${JSON.stringify(projectContext.models, null, 2)}`
+  }
+
+  // 第 3 轮 = 最后一轮：强制输出结构化 JSON，不再追问
+  if (round >= 3) {
+    userMessage += `\n\n## 注意：这是第 ${round} 轮澄清（最后一轮）。你必须直接输出结构化需求 JSON，不能再追问。如果信息不完整，用合理默认值填充。`
   }
 
   // 调用 LLM
@@ -77,9 +99,22 @@ function parseClarificationResponse(response: string, round: number): Clarificat
   }
 
   // 如果解析成功且包含必要字段
-  if (json && json.type && json.entity) {
+  if (json && json.type && json.entity && json.scope && json.description) {
     return {
       requirement: json as StructuredRequirement,
+      needsMoreInfo: false,
+      questions: null,
+      round,
+    }
+  }
+
+  // 第 3 轮兜底：强制输出结构化需求，不再追问
+  if (round >= 3) {
+    return {
+      requirement: {
+        ...currentOrDefault(response),
+        isDefaulted: true,
+      },
       needsMoreInfo: false,
       questions: null,
       round,

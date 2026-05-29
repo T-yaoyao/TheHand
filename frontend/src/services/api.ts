@@ -76,11 +76,12 @@ export const api = {
     requirementId: string,
     role: string,
     content: string,
+    round?: number,
   ): Promise<Conversation> {
     const res = await fetch(`${BASE}/requirements/${requirementId}/conversations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role, content }),
+      body: JSON.stringify({ role, content, ...(round !== undefined ? { round } : {}) }),
     })
     return handleResponse(res)
   },

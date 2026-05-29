@@ -62,6 +62,8 @@ export class AgentRunner {
       totalInputTokens += response.usage.inputTokens
       totalOutputTokens += response.usage.outputTokens
 
+      console.log(`[agent:${agent.name}] round=${rounds} hasToolCalls=${!!response.toolCalls} contentLen=${response.content?.length ?? 0}`)
+
       // 如果有 tool_calls，执行工具并继续循环
       if (response.toolCalls && response.toolCalls.length > 0) {
         // 将 assistant 消息加入历史
@@ -78,15 +80,18 @@ export class AgentRunner {
           if (tool) {
             try {
               const parsed = tool.inputSchema.safeParse(tc.arguments)
-              const input = parsed.success ? parsed.data : tc.arguments
-              const result = await tool.call(input, {
-                sandboxPath: '',  // 由外部注入
-                backupStore: {
-                  save: async () => {},
-                  restore: async () => null,
-                },
-              })
-              toolResult = result.content
+              if (!parsed.success) {
+                toolResult = `参数校验失败: ${parsed.error?.message ?? '未知错误'}。请使用正确的参数格式重试。`
+              } else {
+                const result = await tool.call(parsed.data, {
+                  sandboxPath: '',
+                  backupStore: {
+                    save: async () => {},
+                    restore: async () => null,
+                  },
+                })
+                toolResult = result.content
+              }
             } catch (e: any) {
               toolResult = `Tool error: ${e.message}`
             }
@@ -106,6 +111,10 @@ export class AgentRunner {
       // 没有 tool_calls，解析 content 中的 JSON 作为输出
       finalOutput = this.parseOutput(response.content)
       break
+    }
+
+    if (finalOutput === null) {
+      console.log(`[agent:${agent.name}] FAILED: 循环耗尽 (${rounds}/${maxRounds} 轮), tokens=${totalInputTokens}/${totalOutputTokens}`)
     }
 
     return {
@@ -175,8 +184,8 @@ export class AgentRunner {
       } catch {}
     }
 
-    // 提取花括号包裹的 JSON
-    const braceMatch = content.match(/\{[\s\S]*\}/)
+    // 提取花括号包裹的 JSON（非贪婪匹配）
+    const braceMatch = content.match(/\{[\s\S]*?\}/)
     if (braceMatch) {
       try {
         return JSON.parse(braceMatch[0])

@@ -1,6 +1,6 @@
 import { readFile } from 'fs/promises'
 import { join } from 'path'
-import type { FilePlan } from '../types.js'
+import type { FilePlan, ProjectContext } from '../types.js'
 import type { LLMClient } from '../llm/llm-client.js'
 import type { PromptManager } from '../llm/prompt-manager.js'
 
@@ -30,9 +30,20 @@ export async function runCoding(
   promptManager: PromptManager,
   plan: FilePlan[],
   sandboxPath: string,
+  projectContext?: ProjectContext,
 ): Promise<CodeFileOutput[]> {
   const systemPrompt = await promptManager.load('coding')
   const results: CodeFileOutput[] = []
+
+  // 构建项目约束提示
+  let constraintsHint = ''
+  if (projectContext?.constraints) {
+    const entries = Object.entries(projectContext.constraints)
+    if (entries.length > 0) {
+      constraintsHint = '\n\n## 项目约束（必须遵守）\n' +
+        entries.map(([k, v]) => `- ${k}: ${v}`).join('\n')
+    }
+  }
 
   for (const file of plan) {
     let originalContent = ''
@@ -42,12 +53,14 @@ export async function runCoding(
       // 新文件，无原始内容
     }
 
-    const userMessage = `技术方案条目：\n${JSON.stringify(file, null, 2)}\n\n原始文件 ${file.path}：\n\`\`\`\n${originalContent}\n\`\`\`\n\n请输出修改后的完整文件，JSON 格式包含 path、content、summary。`
+    const userMessage = `技术方案条目：\n${JSON.stringify(file, null, 2)}\n\n原始文件 ${file.path}：\n\`\`\`\n${originalContent}\n\`\`\`\n\n请输出修改后的完整文件，JSON 格式包含 path、content、summary。${constraintsHint}`
 
     const response = await llmClient.simpleChat(systemPrompt, userMessage, 'coding')
     const parsed = parseCodingFileResponse(response, file.path, file.changeDescription)
     if (parsed) {
       results.push(parsed)
+    } else {
+      console.error(`[coding] 文件 ${file.path} 的 LLM 输出解析失败，跳过。response 前200字: ${response?.slice(0, 200)}`)
     }
   }
 
@@ -135,9 +148,10 @@ function tryParseCodingJson(
 /** 从 LLM 回复中提取可能的 JSON 字符串（优先 files 包装结构） */
 function extractJsonCandidates(text: string): string[] {
   const candidates: string[] = [text.trim()]
-  const filesMatch = text.match(/\{[\s\S]*"files"\s*:\s*\[[\s\S]*\][\s\S]*\}/)
+  // 非贪婪匹配，避免跨越多个 JSON 对象
+  const filesMatch = text.match(/\{[\s\S]*?"files"\s*:\s*\[[\s\S]*?\][\s\S]*?\}/)
   if (filesMatch) candidates.unshift(filesMatch[0])
-  const braceMatch = text.match(/\{[\s\S]*\}/)
+  const braceMatch = text.match(/\{[\s\S]*?\}/)
   if (braceMatch) candidates.push(braceMatch[0])
   return [...new Set(candidates)]
 }

@@ -20,7 +20,15 @@ export class TestRunner {
         // Step 1: Lint（非阻塞，lint 失败不阻断流程）
         const lintResult = await this.executeStep('lint', commands.lint);
         steps.push(lintResult);
-        // Step 2: Test（阻塞，test 必须通过）
+        // Step 2: Build（阻塞，验证代码可编译/解析）
+        if (commands.build) {
+            const buildResult = await this.executeStep('build', commands.build);
+            steps.push(buildResult);
+            if (!buildResult.passed) {
+                return { passed: false, steps, fixAttempts };
+            }
+        }
+        // Step 3: Test（阻塞，test 必须通过）
         const testResult = await this.executeStep('unit-test', commands.test);
         steps.push(testResult);
         // 如果 test 失败，尝试自动修复

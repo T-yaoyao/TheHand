@@ -35,6 +35,7 @@ export class ProjectMemory {
       commands: projectConfig.commands,
       models: models ?? {},
       routes: routes ?? {},
+      constraints: projectConfig.constraints ?? {},
     }
 
     this.cache.set(projectId, context)

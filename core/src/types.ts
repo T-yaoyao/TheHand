@@ -141,6 +141,7 @@ export interface ProjectContext {
   commands: ProjectCommands
   models: Record<string, ModelDefinition>
   routes: Record<string, Record<string, string>>
+  constraints?: Record<string, string>
 }
 
 export interface TechStack {

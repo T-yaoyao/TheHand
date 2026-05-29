@@ -16,5 +16,5 @@ export declare function createClarificationAgent(): AgentDefinition;
  * 澄清 Agent 的实际执行逻辑
  * 不走 tool-use 循环，直接调 LLM 解析 JSON
  */
-export declare function runClarification(llmClient: LLMClient, promptManager: PromptManager, pmInput: string, projectContext: any, currentRequirement?: StructuredRequirement | null, round?: number): Promise<ClarificationResult>;
+export declare function runClarification(llmClient: LLMClient, promptManager: PromptManager, pmInput: string, projectContext: any, currentRequirement?: StructuredRequirement | null, round?: number, previousQuestions?: string[], pmReplies?: string[]): Promise<ClarificationResult>;
 //# sourceMappingURL=clarification-agent.d.ts.map

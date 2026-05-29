@@ -11,6 +11,8 @@ interface SidebarProps {
   onCreate: () => void
   onSelect: (req: Requirement) => void
   onRefresh: () => void
+  searchQuery: string
+  onSearchChange: (v: string) => void
 }
 
 export function Sidebar({
@@ -22,6 +24,8 @@ export function Sidebar({
   onCreate,
   onSelect,
   onRefresh,
+  searchQuery,
+  onSearchChange,
 }: SidebarProps) {
   return (
     <aside className="sidebar">
@@ -39,7 +43,7 @@ export function Sidebar({
       </div>
 
       <div className="sidebar-compose">
-        <label className="label">新建需求</label>
+        <label className="label">提交需求</label>
         <textarea
           className="textarea"
           value={newInput}
@@ -59,9 +63,9 @@ export function Sidebar({
           onClick={onCreate}
           disabled={loading || !newInput.trim()}
         >
-          {loading ? '创建中…' : '创建需求'}
+          {loading ? '提交中…' : '提交需求'}
         </button>
-        <span className="hint">Ctrl+Enter 快速创建</span>
+        <span className="hint">Ctrl+Enter 快速提交</span>
       </div>
 
       <div className="sidebar-list-header">
@@ -69,9 +73,21 @@ export function Sidebar({
         <span className="count">{requirements.length}</span>
       </div>
 
+      {requirements.length > 3 && (
+        <div className="sidebar-search">
+          <input
+            type="text"
+            className="search-input"
+            placeholder="搜索需求…"
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+          />
+        </div>
+      )}
+
       <div className="sidebar-list">
         {requirements.length === 0 ? (
-          <p className="empty-hint">暂无需求，在上方创建</p>
+          <p className="empty-hint">{searchQuery ? '无匹配需求' : '暂无需求，在上方创建'}</p>
         ) : (
           requirements.map((req) => (
             <button
