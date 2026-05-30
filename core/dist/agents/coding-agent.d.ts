@@ -18,7 +18,7 @@ export declare function createCodingAgent(): {
 /**
  * 按方案逐文件生成代码（与 cli.mjs 一致，避免 tool-use 循环输出不可解析）
  */
-export declare function runCoding(llmClient: LLMClient, promptManager: PromptManager, plan: FilePlan[], sandboxPath: string, projectContext?: ProjectContext): Promise<CodeFileOutput[]>;
+export declare function runCoding(llmClient: LLMClient, promptManager: PromptManager, plan: FilePlan[], sandboxPath: string, projectContext?: ProjectContext, lessonsHint?: string): Promise<CodeFileOutput[]>;
 /**
  * 解析单文件编码结果：JSON、markdown 代码块或纯文本
  */

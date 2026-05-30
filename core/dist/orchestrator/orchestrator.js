@@ -74,113 +74,184 @@ export class Orchestrator {
             requirement.status = 'clarified';
             await requirementMemory.saveRequirement(requirement);
             yield { type: 'status-change', status: 'clarified', agent: 'clarification' };
-            // 4. 方案阶段
+            // 4. 方案阶段（自愈重试，最多 5 轮）
             yield { type: 'status-change', status: 'planning', agent: 'plan' };
-            const planContext = {
-                requirement,
-                projectContext,
-                memory: await requirementMemory.getContext(requirement.id, projectContext),
-            };
-            const planResult = await agentRunner.run(createPlanAgent(), planContext);
-            if (planResult.status === 'failed' || !planResult.output) {
-                const detail = planResult.status === 'failed'
-                    ? `循环耗尽(${planResult.inputTokens}/${planResult.outputTokens} tokens)`
-                    : `输出为空 (type=${typeof planResult.output}, value=${JSON.stringify(planResult.output)?.slice(0, 200)})`;
-                yield { type: 'failed', requirement, error: `方案 Agent 执行失败: ${detail}` };
-                requirement.status = 'failed';
-                await requirementMemory.saveRequirement(requirement);
-                return;
-            }
-            const plan = this.parsePlan(planResult.output);
-            if (plan.length === 0) {
-                yield { type: 'failed', requirement, error: '方案解析为空，LLM 输出未包含有效文件列表' };
-                requirement.status = 'failed';
-                await requirementMemory.saveRequirement(requirement);
-                return;
+            const MAX_RETRIES = 5;
+            let plan = [];
+            const planErrors = [];
+            for (let planAttempt = 1; planAttempt <= MAX_RETRIES; planAttempt++) {
+                yield { type: 'executing', phase: `planning (attempt ${planAttempt}/${MAX_RETRIES})`, progress: 20 };
+                const planInput = planErrors.length > 0
+                    ? requirement.pmInput + '\n\n## 上轮方案生成失败\n' + planErrors[planErrors.length - 1] + '\n请修正后重新生成方案。'
+                    : requirement.pmInput;
+                const planContext = {
+                    requirement: { ...requirement, pmInput: planInput },
+                    projectContext,
+                    memory: await requirementMemory.getContext(requirement.id, projectContext),
+                };
+                const planResult = await agentRunner.run(createPlanAgent(), planContext);
+                if (planResult.status === 'success' && planResult.output) {
+                    const parsed = this.parsePlan(planResult.output);
+                    if (parsed.length > 0) {
+                        plan = parsed;
+                        break;
+                    }
+                }
+                const errorDetail = planResult.status === 'failed'
+                    ? `LLM 循环耗尽 (${planResult.inputTokens}/${planResult.outputTokens} tokens)`
+                    : `输出解析失败或为空 (type=${typeof planResult.output})`;
+                planErrors.push(`第${planAttempt}轮: ${errorDetail}`);
+                yield { type: 'executing', phase: `plan retry ${planAttempt}/${MAX_RETRIES}: ${errorDetail}`, progress: 20 };
+                if (planAttempt === MAX_RETRIES) {
+                    const detailedError = `方案生成失败 (${MAX_RETRIES}轮):\n${planErrors.join('\n')}`;
+                    yield { type: 'failed', requirement, error: detailedError };
+                    requirement.status = 'failed';
+                    await requirementMemory.saveRequirement(requirement);
+                    // 持久化 lesson
+                    await requirementMemory.saveLesson({
+                        id: crypto.randomUUID(),
+                        projectId,
+                        phase: 'planning',
+                        filePath: null,
+                        errorSummary: `方案生成失败: ${errorDetail}`,
+                        errorDetail: detailedError,
+                        fixHint: null,
+                        resolved: false,
+                        createdAt: new Date(),
+                    });
+                    return;
+                }
             }
             requirement.plan = plan;
             requirement.status = 'plan-approved';
             await requirementMemory.saveRequirement(requirement);
             yield { type: 'plan-ready', plan, requirement };
-            // 5. 编码阶段
+            // 5. 编码+测试阶段（自愈重试，最多 5 轮）
             yield { type: 'status-change', status: 'coding', agent: 'coding' };
             const skill = requirement.structuredRequirement
                 ? skillRegistry.match(requirement.structuredRequirement)
                 : null;
-            let codeOutputs = [];
-            if (skill) {
-                yield { type: 'executing', phase: `skill: ${skill.name}`, progress: 30 };
-                const skillOutputs = await skill.execute(requirement.structuredRequirement, projectContext);
-                codeOutputs = skillOutputs.map(o => ({
-                    path: o.path,
-                    content: o.content,
-                    summary: o.summary,
-                }));
-            }
-            else {
-                const planFiles = requirement.plan ?? [];
-                if (planFiles.length === 0) {
-                    yield { type: 'failed', requirement, error: '方案为空，无法编码' };
-                    requirement.status = 'failed';
-                    await requirementMemory.saveRequirement(requirement);
-                    return;
-                }
-                yield { type: 'executing', phase: 'coding-agent', progress: 30 };
-                codeOutputs = await runCoding(llmClient, promptManager, planFiles, sandbox.path, projectContext);
-            }
-            // 写入文件到沙箱（__DELETE__ 标记的文件执行删除）
-            yield { type: 'executing', phase: 'writing-files', progress: 60 };
+            const codeErrors = [];
             const { writeFile, mkdir, rm } = await import('fs/promises');
             const { dirname, join } = await import('path');
-            const validOutputs = codeOutputs.filter(f => f.path && f.content);
-            if (validOutputs.length === 0) {
-                yield { type: 'failed', requirement, error: '编码阶段未生成有效文件' };
-                requirement.status = 'failed';
-                await requirementMemory.saveRequirement(requirement);
-                return;
-            }
-            for (const file of validOutputs) {
-                const fullPath = join(sandbox.path, file.path);
-                if (file.content.trim().includes('__DELETE__')) {
-                    try {
-                        await rm(fullPath, { force: true });
-                        yield { type: 'executing', phase: `deleted: ${file.path}`, progress: 60 };
-                    }
-                    catch {
-                        yield { type: 'executing', phase: `delete skipped: ${file.path} (not found)`, progress: 60 };
-                    }
+            const commands = projectContext.commands?.lint ? projectContext.commands : { lint: 'npm run lint', test: 'npm test', build: 'npm run build' };
+            const pastLessons = await requirementMemory.getLessons(projectId, 'coding', 5);
+            let codeOutputs = [];
+            for (let codeAttempt = 1; codeAttempt <= MAX_RETRIES; codeAttempt++) {
+                yield { type: 'executing', phase: `coding (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 30 };
+                // 构建错误反馈 + 历史教训
+                let codingHint = '';
+                if (codeErrors.length > 0) {
+                    codingHint = '\n\n## 上轮编码/测试失败\n' + codeErrors[codeErrors.length - 1] + '\n请修正以上错误后重新生成代码。';
+                }
+                if (pastLessons.length > 0) {
+                    codingHint += '\n\n## 历史失败教训（请避免重复以下错误）\n' +
+                        pastLessons.map(l => `- [${l.phase}/${l.filePath ?? 'general'}] ${l.errorSummary}`).join('\n');
+                }
+                codeOutputs = [];
+                if (skill) {
+                    yield { type: 'executing', phase: `skill: ${skill.name}`, progress: 35 };
+                    const skillOutputs = await skill.execute(requirement.structuredRequirement, projectContext);
+                    codeOutputs = skillOutputs.map(o => ({ path: o.path, content: o.content, summary: o.summary }));
                 }
                 else {
-                    await mkdir(dirname(fullPath), { recursive: true });
-                    await writeFile(fullPath, file.content, 'utf-8');
-                    yield { type: 'executing', phase: `wrote: ${file.path}`, progress: 60 };
+                    const planFiles = requirement.plan ?? [];
+                    yield { type: 'executing', phase: `coding-agent (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 35 };
+                    codeOutputs = await runCoding(llmClient, promptManager, planFiles, sandbox.path, projectContext, codingHint || undefined);
+                }
+                // 写入文件到沙箱
+                yield { type: 'executing', phase: 'writing-files', progress: 60 };
+                const validOutputs = codeOutputs.filter(f => f.path && f.content);
+                if (validOutputs.length === 0) {
+                    const err = '编码阶段未生成有效文件';
+                    codeErrors.push(`第${codeAttempt}轮: ${err}`);
+                    if (codeAttempt === MAX_RETRIES) {
+                        const detailedError = `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`;
+                        yield { type: 'failed', requirement, error: detailedError };
+                        requirement.status = 'failed';
+                        await requirementMemory.saveRequirement(requirement);
+                        await requirementMemory.saveLesson({
+                            id: crypto.randomUUID(),
+                            projectId,
+                            phase: 'coding',
+                            filePath: null,
+                            errorSummary: err,
+                            errorDetail: detailedError,
+                            fixHint: null,
+                            resolved: false,
+                            createdAt: new Date(),
+                        });
+                        return;
+                    }
+                    continue;
+                }
+                // 清空沙箱旧文件后重新写入（避免上轮残留）
+                for (const file of validOutputs) {
+                    const fullPath = join(sandbox.path, file.path);
+                    if (file.content.trim().includes('__DELETE__')) {
+                        try {
+                            await rm(fullPath, { force: true });
+                            yield { type: 'executing', phase: `deleted: ${file.path}`, progress: 60 };
+                        }
+                        catch {
+                            yield { type: 'executing', phase: `delete skipped: ${file.path} (not found)`, progress: 60 };
+                        }
+                    }
+                    else {
+                        await mkdir(dirname(fullPath), { recursive: true });
+                        await writeFile(fullPath, file.content, 'utf-8');
+                        yield { type: 'executing', phase: `wrote: ${file.path}`, progress: 60 };
+                    }
+                }
+                // 测试阶段
+                yield { type: 'status-change', status: 'testing', agent: 'test' };
+                yield { type: 'executing', phase: `testing (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 70 };
+                const testResult = await testRunner.run({
+                    lint: commands.lint,
+                    test: commands.test,
+                    build: commands.build,
+                });
+                yield {
+                    type: 'test-result',
+                    passed: testResult.passed,
+                    details: JSON.stringify(testResult, null, 2),
+                };
+                if (testResult.passed) {
+                    // 测试通过，标记相关 lessons 为已解决
+                    for (const lesson of pastLessons) {
+                        await requirementMemory.markLessonResolved(lesson.id);
+                    }
+                    break; // 成功！跳出编码重试循环
+                }
+                // 测试失败，收集错误反馈给下一轮编码
+                const testErrors = testResult.steps
+                    .filter(s => !s.passed)
+                    .map(s => `${s.name}: ${s.output.slice(0, 500)}`)
+                    .join('\n---\n');
+                codeErrors.push(`第${codeAttempt}轮测试失败:\n${testErrors}`);
+                yield { type: 'executing', phase: `test failed (attempt ${codeAttempt}/${MAX_RETRIES}), retrying coding...`, progress: 65 };
+                if (codeAttempt === MAX_RETRIES) {
+                    const detailedError = `编码+测试失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`;
+                    yield { type: 'failed', requirement, error: detailedError };
+                    requirement.status = 'failed';
+                    await requirementMemory.saveRequirement(requirement);
+                    // 持久化 lesson
+                    await requirementMemory.saveLesson({
+                        id: crypto.randomUUID(),
+                        projectId,
+                        phase: 'testing',
+                        filePath: null,
+                        errorSummary: `测试失败: ${testResult.steps.filter(s => !s.passed).map(s => s.name).join(', ')}`,
+                        errorDetail: detailedError,
+                        fixHint: null,
+                        resolved: false,
+                        createdAt: new Date(),
+                    });
+                    return;
                 }
             }
-            // 6. 测试阶段 — 直接执行 lint/build/test，不依赖 LLM
-            yield { type: 'status-change', status: 'testing', agent: 'test' };
-            yield { type: 'executing', phase: 'running-tests', progress: 70 };
-            const commands = projectContext.commands?.lint ? projectContext.commands : { lint: 'npm run lint', test: 'npm test', build: 'npm run build' };
-            const testResult = await testRunner.run({
-                lint: commands.lint,
-                test: commands.test,
-                build: commands.build,
-            });
-            yield {
-                type: 'test-result',
-                passed: testResult.passed,
-                details: JSON.stringify(testResult, null, 2),
-            };
-            // 测试失败 → 不提交、不应用，报告失败
-            if (!testResult.passed) {
-                yield {
-                    type: 'failed',
-                    requirement,
-                    error: `测试未通过，代码未提交。详情: ${testResult.steps.map(s => `${s.name}: ${s.passed ? 'PASS' : 'FAIL'}`).join(', ')}`,
-                };
-                requirement.status = 'failed';
-                await requirementMemory.saveRequirement(requirement);
-                return;
-            }
+            // 编码循环成功退出后，获取最终的 validOutputs 用于后续步骤
+            const validOutputs = codeOutputs.filter(f => f.path && f.content);
             // 7. Diff 检查
             yield { type: 'executing', phase: 'diff-check', progress: 80 };
             const changedFiles = await repoManager.getChangedFiles();

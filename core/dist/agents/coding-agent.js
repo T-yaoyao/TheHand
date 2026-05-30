@@ -14,10 +14,10 @@ export function createCodingAgent() {
 /**
  * 按方案逐文件生成代码（与 cli.mjs 一致，避免 tool-use 循环输出不可解析）
  */
-export async function runCoding(llmClient, promptManager, plan, sandboxPath, projectContext) {
+export async function runCoding(llmClient, promptManager, plan, sandboxPath, projectContext, lessonsHint) {
     const systemPrompt = await promptManager.load('coding');
     const results = [];
-    // 构建项目约束提示
+    // 构建项目约束 + 错误反馈 + 历史教训
     let constraintsHint = '';
     if (projectContext?.constraints) {
         const entries = Object.entries(projectContext.constraints);
@@ -25,6 +25,9 @@ export async function runCoding(llmClient, promptManager, plan, sandboxPath, pro
             constraintsHint = '\n\n## 项目约束（必须遵守）\n' +
                 entries.map(([k, v]) => `- ${k}: ${v}`).join('\n');
         }
+    }
+    if (lessonsHint) {
+        constraintsHint += lessonsHint;
     }
     for (const file of plan) {
         let originalContent = '';

@@ -31,11 +31,12 @@ export async function runCoding(
   plan: FilePlan[],
   sandboxPath: string,
   projectContext?: ProjectContext,
+  lessonsHint?: string,
 ): Promise<CodeFileOutput[]> {
   const systemPrompt = await promptManager.load('coding')
   const results: CodeFileOutput[] = []
 
-  // 构建项目约束提示
+  // 构建项目约束 + 错误反馈 + 历史教训
   let constraintsHint = ''
   if (projectContext?.constraints) {
     const entries = Object.entries(projectContext.constraints)
@@ -43,6 +44,9 @@ export async function runCoding(
       constraintsHint = '\n\n## 项目约束（必须遵守）\n' +
         entries.map(([k, v]) => `- ${k}: ${v}`).join('\n')
     }
+  }
+  if (lessonsHint) {
+    constraintsHint += lessonsHint
   }
 
   for (const file of plan) {

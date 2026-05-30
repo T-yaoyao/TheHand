@@ -67,6 +67,20 @@ export async function initDB(): Promise<Database> {
     )
   `)
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS lessons (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      phase TEXT NOT NULL,
+      file_path TEXT,
+      error_summary TEXT NOT NULL,
+      error_detail TEXT,
+      fix_hint TEXT,
+      resolved INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+
   saveDB()
   return db
 }

@@ -25,6 +25,7 @@ export type {
   Requirement,
   RequirementStatus,
   Conversation,
+  Lesson,
   StructuredRequirement,
   AgentDefinition,
   AgentContext,

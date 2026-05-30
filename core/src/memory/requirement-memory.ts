@@ -1,6 +1,7 @@
 import type {
   Requirement,
   Conversation,
+  Lesson,
   MemoryContext,
   ProjectContext,
 } from '../types.js'
@@ -12,6 +13,7 @@ import type {
 export class RequirementMemory {
   private requirements: Map<string, Requirement> = new Map()
   private conversations: Map<string, Conversation[]> = new Map()
+  private lessons: Map<string, Lesson[]> = new Map()
 
   async getRequirement(id: string): Promise<Requirement | null> {
     return this.requirements.get(id) ?? null
@@ -32,6 +34,28 @@ export class RequirementMemory {
     return all.slice(-limit)
   }
 
+  async saveLesson(lesson: Lesson): Promise<void> {
+    const list = this.lessons.get(lesson.projectId) ?? []
+    list.push(lesson)
+    this.lessons.set(lesson.projectId, list)
+  }
+
+  async getLessons(projectId: string, phase?: string, limit: number = 5): Promise<Lesson[]> {
+    const all = this.lessons.get(projectId) ?? []
+    const filtered = phase ? all.filter(l => l.phase === phase && !l.resolved) : all.filter(l => !l.resolved)
+    return filtered.slice(-limit)
+  }
+
+  async markLessonResolved(id: string): Promise<void> {
+    for (const list of this.lessons.values()) {
+      const lesson = list.find(l => l.id === id)
+      if (lesson) {
+        lesson.resolved = true
+        break
+      }
+    }
+  }
+
   /**
    * 获取给 LLM 的上下文
    * 不传全量对话历史，只传结构化需求 + 最近几轮
@@ -39,11 +63,13 @@ export class RequirementMemory {
   async getContext(requirementId: string, projectContext: ProjectContext): Promise<MemoryContext> {
     const requirement = this.requirements.get(requirementId)
     const recentConversations = await this.getRecentConversations(requirementId)
+    const lessons = await this.getLessons(projectContext.id)
 
     return {
       structuredRequirement: requirement?.structuredRequirement ?? null,
       recentConversations,
       projectContext,
+      lessons,
     }
   }
 

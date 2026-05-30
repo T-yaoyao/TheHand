@@ -5,6 +5,7 @@
 export class RequirementMemory {
     requirements = new Map();
     conversations = new Map();
+    lessons = new Map();
     async getRequirement(id) {
         return this.requirements.get(id) ?? null;
     }
@@ -20,6 +21,25 @@ export class RequirementMemory {
         const all = this.conversations.get(requirementId) ?? [];
         return all.slice(-limit);
     }
+    async saveLesson(lesson) {
+        const list = this.lessons.get(lesson.projectId) ?? [];
+        list.push(lesson);
+        this.lessons.set(lesson.projectId, list);
+    }
+    async getLessons(projectId, phase, limit = 5) {
+        const all = this.lessons.get(projectId) ?? [];
+        const filtered = phase ? all.filter(l => l.phase === phase && !l.resolved) : all.filter(l => !l.resolved);
+        return filtered.slice(-limit);
+    }
+    async markLessonResolved(id) {
+        for (const list of this.lessons.values()) {
+            const lesson = list.find(l => l.id === id);
+            if (lesson) {
+                lesson.resolved = true;
+                break;
+            }
+        }
+    }
     /**
      * 获取给 LLM 的上下文
      * 不传全量对话历史，只传结构化需求 + 最近几轮
@@ -27,10 +47,12 @@ export class RequirementMemory {
     async getContext(requirementId, projectContext) {
         const requirement = this.requirements.get(requirementId);
         const recentConversations = await this.getRecentConversations(requirementId);
+        const lessons = await this.getLessons(projectContext.id);
         return {
             structuredRequirement: requirement?.structuredRequirement ?? null,
             recentConversations,
             projectContext,
+            lessons,
         };
     }
     /**

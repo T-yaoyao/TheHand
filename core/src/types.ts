@@ -71,6 +71,7 @@ export interface MemoryContext {
   structuredRequirement: StructuredRequirement | null
   recentConversations: Conversation[]
   projectContext: ProjectContext
+  lessons: Lesson[]
 }
 
 export interface AgentResult {
@@ -181,6 +182,18 @@ export interface Conversation {
   role: 'pm' | 'system'
   content: string
   round: number
+  createdAt: Date
+}
+
+export interface Lesson {
+  id: string
+  projectId: string
+  phase: string
+  filePath: string | null
+  errorSummary: string
+  errorDetail: string | null
+  fixHint: string | null
+  resolved: boolean
   createdAt: Date
 }
 

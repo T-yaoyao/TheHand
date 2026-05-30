@@ -1,4 +1,4 @@
-import type { Requirement, Conversation, MemoryContext, ProjectContext } from '@thehand/core'
+import type { Requirement, Conversation, Lesson, MemoryContext, ProjectContext } from '@thehand/core'
 import { queryAll, queryOne, execute } from './db.js'
 import { randomUUID } from 'crypto'
 
@@ -23,6 +23,20 @@ function rowToConversation(row: Record<string, unknown>): Conversation {
     role: row.role as Conversation['role'],
     content: row.content as string,
     round: row.round as number,
+    createdAt: new Date(row.created_at as string),
+  }
+}
+
+function rowToLesson(row: Record<string, unknown>): Lesson {
+  return {
+    id: row.id as string,
+    projectId: row.project_id as string,
+    phase: row.phase as string,
+    filePath: (row.file_path as string) ?? null,
+    errorSummary: row.error_summary as string,
+    errorDetail: (row.error_detail as string) ?? null,
+    fixHint: (row.fix_hint as string) ?? null,
+    resolved: (row.resolved as number) === 1,
     createdAt: new Date(row.created_at as string),
   }
 }
@@ -77,13 +91,48 @@ export class DbRequirementMemory {
     return rows.map(rowToConversation).reverse()
   }
 
+  async saveLesson(lesson: Lesson): Promise<void> {
+    execute(
+      `INSERT INTO lessons (id, project_id, phase, file_path, error_summary, error_detail, fix_hint, resolved) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        lesson.id || randomUUID(),
+        lesson.projectId,
+        lesson.phase,
+        lesson.filePath,
+        lesson.errorSummary,
+        lesson.errorDetail,
+        lesson.fixHint,
+        lesson.resolved ? 1 : 0,
+      ],
+    )
+  }
+
+  async getLessons(projectId: string, phase?: string, limit = 5): Promise<Lesson[]> {
+    const rows = phase
+      ? queryAll(
+          `SELECT * FROM lessons WHERE project_id = ? AND phase = ? AND resolved = 0 ORDER BY created_at DESC LIMIT ?`,
+          [projectId, phase, limit],
+        )
+      : queryAll(
+          `SELECT * FROM lessons WHERE project_id = ? AND resolved = 0 ORDER BY created_at DESC LIMIT ?`,
+          [projectId, limit],
+        )
+    return rows.map(rowToLesson)
+  }
+
+  async markLessonResolved(id: string): Promise<void> {
+    execute(`UPDATE lessons SET resolved = 1 WHERE id = ?`, [id])
+  }
+
   async getContext(requirementId: string, projectContext: ProjectContext): Promise<MemoryContext> {
     const requirement = await this.getRequirement(requirementId)
     const recentConversations = await this.getRecentConversations(requirementId, 10)
+    const lessons = await this.getLessons(projectContext.id, undefined, 5)
     return {
       structuredRequirement: requirement?.structuredRequirement ?? null,
       recentConversations,
       projectContext,
+      lessons,
     }
   }
 
