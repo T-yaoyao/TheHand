@@ -1,4 +1,4 @@
-import { exec } from 'child_process';
+import { exec, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { mkdtemp, rm, mkdir, cp, readdir } from 'fs/promises';
 import { join } from 'path';
@@ -143,12 +143,22 @@ export class DockerSandboxManager {
         }
     }
     async dockerExec(containerName, command, timeout = 120_000) {
+        // 通过 stdin 传入命令，避免 shell 转义问题（Windows 兼容）
+        const script = `set -e\n${command}`;
         try {
-            const { stdout, stderr } = await execAsync(`docker exec ${containerName} bash -c ${this.shellEscape(command)}`, { timeout, maxBuffer: 10 * 1024 * 1024 });
-            return { stdout, stderr, exitCode: 0 };
+            const stdout = execFileSync('docker', ['exec', '-i', containerName, 'bash'], {
+                input: script,
+                timeout,
+                maxBuffer: 10 * 1024 * 1024,
+            }).toString();
+            return { stdout, stderr: '', exitCode: 0 };
         }
         catch (e) {
-            return { stdout: e.stdout ?? '', stderr: e.stderr ?? '', exitCode: e.code ?? 1 };
+            return {
+                stdout: e.stdout?.toString() ?? '',
+                stderr: e.stderr?.toString() ?? '',
+                exitCode: e.status ?? 1,
+            };
         }
     }
     findEntry(sandbox) {
