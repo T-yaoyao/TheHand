@@ -35,7 +35,7 @@ async function getDeps() {
       const projectMemory = new ProjectMemory(resolve(repoRoot, 'projects'))
       const requirementMemory = new DbRequirementMemory() as unknown as RequirementMemory
       const sandboxManager = new DockerSandboxManager(sandboxSource, {
-        network: process.env.SANDBOX_NETWORK ?? 'none',
+        network: process.env.SANDBOX_NETWORK ?? 'bridge',
         memory: process.env.SANDBOX_MEMORY ?? '1g',
         cpus: process.env.SANDBOX_CPUS ?? '1.0',
       })

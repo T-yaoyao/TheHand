@@ -37,7 +37,7 @@ export class DockerSandboxManager {
     config: DockerSandboxConfig = {},
   ) {
     this.image = config.image ?? 'thehand-sandbox'
-    this.network = config.network ?? 'none'
+    this.network = config.network ?? 'bridge'
     this.memory = config.memory ?? '1g'
     this.cpus = config.cpus ?? '1.0'
     this.tempBase = config.tempBase ?? join(tmpdir(), 'thehand-sandbox')
@@ -74,6 +74,13 @@ export class DockerSandboxManager {
       'git init && git config user.email "thehand@sandbox" && ' +
         'git config user.name "TheHand Sandbox" && ' +
         'git add -A && git commit -m "initial snapshot" --allow-empty',
+    )
+
+    // 在容器内安装依赖（避免宿主机 node_modules 原生二进制不兼容）
+    await this.dockerExec(
+      containerName,
+      'npm install',
+      180_000,  // npm install 可能耗时较长
     )
 
     const sandbox: Sandbox = {
@@ -167,7 +174,7 @@ export class DockerSandboxManager {
   }
 
   private async copySource(src: string, dest: string): Promise<void> {
-    const exclude = new Set(['.git', 'dist', 'build'])
+    const exclude = new Set(['.git', 'dist', 'build', 'node_modules'])
     const entries = await readdir(src, { withFileTypes: true })
     for (const entry of entries) {
       if (exclude.has(entry.name)) continue
