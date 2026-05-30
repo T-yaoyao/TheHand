@@ -132,7 +132,7 @@ export class DockerSandboxManager {
         this.imageBuilt = true;
     }
     async copySource(src, dest) {
-        const exclude = new Set(['.git', 'dist', 'build', 'node_modules']);
+        const exclude = new Set(['.git', 'dist', 'build']);
         const entries = await readdir(src, { withFileTypes: true });
         for (const entry of entries) {
             if (exclude.has(entry.name))

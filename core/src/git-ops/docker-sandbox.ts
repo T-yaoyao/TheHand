@@ -167,7 +167,7 @@ export class DockerSandboxManager {
   }
 
   private async copySource(src: string, dest: string): Promise<void> {
-    const exclude = new Set(['.git', 'dist', 'build', 'node_modules'])
+    const exclude = new Set(['.git', 'dist', 'build'])
     const entries = await readdir(src, { withFileTypes: true })
     for (const entry of entries) {
       if (exclude.has(entry.name)) continue
