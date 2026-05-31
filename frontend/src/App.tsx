@@ -331,9 +331,17 @@ export function App() {
                   onClick={() => setTab(key)}
                 >
                   {label}
+                  {key === 'chat' && canReply && <span className="tab-badge">!</span>}
                 </button>
               ))}
             </nav>
+
+            {canReply && tab !== 'chat' && (
+              <div className="reply-banner" onClick={() => setTab('chat')}>
+                <span>💬 系统有追问需要你回复，</span>
+                <strong>点击切换到「对话」tab →</strong>
+              </div>
+            )}
 
             <div className="tab-panel">
               {tab === 'progress' && (

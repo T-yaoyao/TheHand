@@ -344,6 +344,44 @@
   border-bottom-color: var(--accent);
 }
 
+.tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 4px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 50%;
+  animation: pulse-badge 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-badge {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.2); }
+}
+
+.reply-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 16px;
+  background: rgba(91, 141, 239, 0.1);
+  border-bottom: 1px solid rgba(91, 141, 239, 0.2);
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.reply-banner:hover {
+  background: rgba(91, 141, 239, 0.18);
+}
+
 .tab-panel {
   flex: 1;
   overflow-y: auto;
