@@ -394,7 +394,7 @@ export class Orchestrator {
 
       // 8. 提交代码到沙箱 git
       yield { type: 'executing', phase: 'committing', progress: 90 }
-      const rawCommitMsg = `feat: ${requirement.structuredRequirement?.description ?? requirement.pmInput}`
+      const rawCommitMsg = `feat: ${requirement.structuredRequirement?.description ?? requirement.pmInput} [req:${requirement.id.slice(0, 8)}]`
       const commitMsg = rawCommitMsg.replace(/[`$"]/g, "'").slice(0, 200)
       try {
         await repoManager.commit(commitMsg)

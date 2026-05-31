@@ -189,16 +189,16 @@ requirementsRouter.post('/:id/revert', async (req: Request, res: Response) => {
   }
 
   try {
-    // 在 git log 中查找包含需求描述的 commit
-    const pmInput = (requirement.pm_input as string).slice(0, 50)
+    // 通过 commit message 中的 [req:ID] 标记查找对应 commit
+    const reqMarker = `[req:${id.slice(0, 8)}]`
     const { stdout: logOutput } = await execAsync(
-      `git log --oneline --all -20 --grep="${pmInput.replace(/"/g, '\\"')}"`,
+      `git log --oneline --all -20 --grep="${reqMarker}"`,
       { cwd: sourceRepo },
     )
 
     const commits = logOutput.trim().split('\n').filter(Boolean)
     if (commits.length === 0) {
-      res.status(400).json({ error: '未找到该需求对应的 git commit，无法撤回' })
+      res.status(400).json({ error: `未找到该需求对应的 git commit（标记: ${reqMarker}），无法撤回` })
       return
     }
 
