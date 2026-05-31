@@ -80,6 +80,7 @@ export function App() {
     if (latestEvent.type === 'waiting-for-pm') {
       setTab('chat')
       setThinking(false)
+      refreshList()
       api.getConversations(selected.id).then(setConversations).catch(() => {})
     }
     if (latestEvent.type === 'status-change' || latestEvent.type === 'completed' || latestEvent.type === 'failed') {
