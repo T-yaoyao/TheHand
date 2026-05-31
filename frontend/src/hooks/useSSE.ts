@@ -8,10 +8,13 @@ export interface OrchestratorEvent {
   progress?: number
   requirement?: { status?: string; pmInput?: string; structuredRequirement?: unknown; plan?: unknown }
   plan?: { path: string; changeDescription: string; priority?: number }[]
+  diff?: string
+  files?: { path: string; summary: string }[]
   questions?: string[]
   passed?: boolean
   details?: string
   error?: string
+  userMessage?: string
   requirementId?: string
   projectId?: string
 }
@@ -52,7 +55,10 @@ export function useSSE(requirementId: string | null) {
         const event: OrchestratorEvent = JSON.parse(e.data)
         if (event.type === 'connected') return
         setLatestEvent(event)
-        setEvents((prev) => [...prev, event])
+        setEvents((prev) => {
+          const next = [...prev, event]
+          return next.length > 500 ? next.slice(-250) : next
+        })
       } catch {
         // heartbeat
       }

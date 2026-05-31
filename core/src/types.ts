@@ -13,6 +13,7 @@ export type RequirementStatus =
   | 'plan-rejected'
   | 'coding'
   | 'testing'
+  | 'diff-ready'
   | 'done'
   | 'failed'
   | 'reverted'
@@ -189,6 +190,7 @@ export interface Conversation {
 export interface Lesson {
   id: string
   projectId: string
+  requirementId?: string | null
   phase: string
   filePath: string | null
   errorSummary: string
@@ -230,7 +232,8 @@ export type OrchestratorEvent =
   | { type: 'status-change'; status: RequirementStatus; agent: string }
   | { type: 'waiting-for-pm'; requirement: Requirement; questions: string[] }
   | { type: 'plan-ready'; plan: FilePlan[]; requirement: Requirement }
+  | { type: 'diff-ready'; requirement: Requirement; diff: string; files: { path: string; summary: string }[] }
   | { type: 'executing'; phase: string; progress: number }
   | { type: 'test-result'; passed: boolean; details: string }
   | { type: 'completed'; requirement: Requirement; prUrl?: string; sandboxPath?: string }
-  | { type: 'failed'; requirement: Requirement; error: string }
+  | { type: 'failed'; requirement: Requirement; error: string; userMessage?: string }

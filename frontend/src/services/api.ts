@@ -30,6 +30,7 @@ async function handleResponse<T>(res: Response): Promise<T> {
     const err = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error((err as { error?: string }).error ?? '请求失败')
   }
+  if (res.status === 204) return {} as T
   return res.json()
 }
 
@@ -100,6 +101,30 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     })
+    return handleResponse(res)
+  },
+
+  async approvePlan(requirementId: string): Promise<{ ok: boolean }> {
+    const res = await fetch(`${BASE}/requirements/${requirementId}/approve-plan`, { method: 'POST' })
+    return handleResponse(res)
+  },
+
+  async rejectPlan(requirementId: string, reason?: string): Promise<{ ok: boolean }> {
+    const res = await fetch(`${BASE}/requirements/${requirementId}/reject-plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    })
+    return handleResponse(res)
+  },
+
+  async commitChanges(requirementId: string): Promise<{ ok: boolean }> {
+    const res = await fetch(`${BASE}/requirements/${requirementId}/commit`, { method: 'POST' })
+    return handleResponse(res)
+  },
+
+  async rollbackChanges(requirementId: string): Promise<{ ok: boolean }> {
+    const res = await fetch(`${BASE}/requirements/${requirementId}/rollback`, { method: 'POST' })
     return handleResponse(res)
   },
 }

@@ -1,6 +1,7 @@
 import { resolve } from 'path';
-import { LLMClient, PromptManager, AgentRunner, SkillRegistry, SandboxManager, ProjectMemory, Orchestrator, createFileReadTool, createFileWriteTool, createShellTool, } from '@thehand/core';
+import { LLMClient, PromptManager, AgentRunner, SkillRegistry, DockerSandboxManager, ProjectMemory, Orchestrator, createFileReadTool, createFileWriteTool, createShellTool, } from '@thehand/core';
 import { DbRequirementMemory, loadRequirementFromDb } from './db-requirement-memory.js';
+import { execute } from './db.js';
 import { pushEvent } from './routes/events.js';
 import { log } from './logger.js';
 const repoRoot = resolve(process.cwd(), '..');
@@ -14,7 +15,11 @@ async function getDeps() {
             const promptManager = new PromptManager(resolve(repoRoot, 'prompts'));
             const projectMemory = new ProjectMemory(resolve(repoRoot, 'projects'));
             const requirementMemory = new DbRequirementMemory();
-            const sandboxManager = new SandboxManager(sandboxSource);
+            const sandboxManager = new DockerSandboxManager(sandboxSource, {
+                network: process.env.SANDBOX_NETWORK ?? 'bridge',
+                memory: process.env.SANDBOX_MEMORY ?? '1g',
+                cpus: process.env.SANDBOX_CPUS ?? '1.0',
+            });
             const tools = [
                 createFileReadTool(sandboxSource),
                 createFileWriteTool(sandboxSource),
@@ -71,7 +76,11 @@ export async function runOrchestratorForRequirement(requirementId, projectId = '
             eventCount++;
             pushEvent(requirementId, serializeEvent(event, requirementId));
             logOrchestratorEvent(requirementId, event);
-            if (event.type === 'completed' || event.type === 'failed' || event.type === 'waiting-for-pm') {
+            if (event.type === 'completed' || event.type === 'failed' || event.type === 'waiting-for-pm' || event.type === 'plan-ready' || event.type === 'diff-ready') {
+                // waiting-for-pm 时立即释放 runningJobs，让 PM 回复能重新触发流水线
+                if (event.type === 'waiting-for-pm' || event.type === 'plan-ready' || event.type === 'diff-ready') {
+                    runningJobs.delete(requirementId);
+                }
                 break;
             }
         }
@@ -82,6 +91,8 @@ export async function runOrchestratorForRequirement(requirementId, projectId = '
     }
     catch (e) {
         const message = e instanceof Error ? e.message : String(e);
+        // 将失败状态写入数据库（确保前端 refreshList 能获取到 failed 状态）
+        execute(`UPDATE requirements SET status = 'failed', updated_at = datetime('now') WHERE id = ?`, [requirementId]);
         pushEvent(requirementId, {
             type: 'failed',
             requirement: { id: requirementId, status: 'failed' },

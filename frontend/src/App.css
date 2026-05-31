@@ -928,6 +928,27 @@
 .modal p { margin-bottom: 16px; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
+/* Diff panel */
+.diff-panel { padding: 0; }
+.diff-header { padding: 16px; border-bottom: 1px solid var(--border); }
+.diff-header h3 { margin: 0 0 4px; }
+.diff-header p { margin: 0; color: var(--text-muted); font-size: 13px; }
+.diff-file-list { margin: 8px 0 0; padding-left: 20px; font-size: 13px; }
+.diff-file-list code { background: var(--bg-code); padding: 1px 4px; border-radius: 3px; }
+.diff-content {
+  margin: 0;
+  padding: 16px;
+  background: var(--bg-code);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .sidebar {

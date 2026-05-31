@@ -71,6 +71,7 @@ export async function initDB(): Promise<Database> {
     CREATE TABLE IF NOT EXISTS lessons (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
+      requirement_id TEXT,
       phase TEXT NOT NULL,
       file_path TEXT,
       error_summary TEXT NOT NULL,
@@ -91,6 +92,13 @@ export async function initDB(): Promise<Database> {
       FOREIGN KEY (requirement_id) REFERENCES requirements(id)
     )
   `)
+
+  // 迁移：给 lessons 表添加 requirement_id 列（兼容旧数据库）
+  try {
+    db.run(`ALTER TABLE lessons ADD COLUMN requirement_id TEXT`)
+  } catch {
+    // 列已存在，忽略
+  }
 
   saveDB()
   return db

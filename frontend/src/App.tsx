@@ -10,7 +10,7 @@ import { PlanView } from './components/PlanView'
 import { StructuredView } from './components/StructuredView'
 import './App.css'
 
-type Tab = 'progress' | 'chat' | 'plan' | 'detail'
+type Tab = 'progress' | 'chat' | 'plan' | 'diff' | 'detail'
 
 export function App() {
   const [requirements, setRequirements] = useState<Requirement[]>([])
@@ -32,13 +32,19 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const chatEndRef = useRef<HTMLDivElement>(null)
   const selectedRef = useRef<Requirement | null>(null)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout>>()
   selectedRef.current = selected
 
   const { events, connected, latestEvent, clearEvents, reconnect } = useSSE(selected?.id ?? null)
 
   const showToast = useCallback((type: 'error' | 'success', msg: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
     setToast({ type, msg })
-    setTimeout(() => setToast(null), 4000)
+    toastTimerRef.current = setTimeout(() => setToast(null), 4000)
+  }, [])
+
+  useEffect(() => {
+    return () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current) }
   }, [])
 
   const refreshList = useCallback(async () => {
@@ -81,6 +87,10 @@ export function App() {
     if (!latestEvent || !selected) return
     if (latestEvent.type === 'plan-ready') {
       setTab('plan')
+      refreshList()
+    }
+    if (latestEvent.type === 'diff-ready') {
+      setTab('diff')
       refreshList()
     }
     if (latestEvent.type === 'waiting-for-pm') {
@@ -202,8 +212,8 @@ export function App() {
   const livePlan = latestEvent?.type === 'plan-ready' ? latestEvent.plan : null
 
   const canReply = selected?.status === 'clarifying' || selected?.status === 'waiting-for-pm'
-  const isRunning = ['clarifying', 'clarified', 'planning', 'coding', 'testing'].includes(selected?.status ?? '')
-  const showRunButton = !isRunning || selected?.status === 'clarified'
+  const isRunning = ['clarifying', 'clarified', 'planning', 'coding', 'testing', 'diff-ready'].includes(selected?.status ?? '')
+  const showRunButton = !isRunning || selected?.status === 'clarified' || selected?.status === 'plan-rejected'
   const runButtonText = running ? '运行中…' : (selected?.status === 'done' || selected?.status === 'failed') ? '重新运行' : '运行流水线'
 
   const filteredRequirements = searchQuery
@@ -300,6 +310,7 @@ export function App() {
                   ['progress', '进度'],
                   ['chat', '对话'],
                   ['plan', '方案'],
+                  ['diff', '变更预览'],
                   ['detail', '结构化需求'],
                 ] as const
               ).map(([key, label]) => (
@@ -367,18 +378,78 @@ export function App() {
                   <PlanView plan={(livePlan as FilePlan[] | undefined) ?? plan} />
                   {(selected.status === 'plan-approved' || latestEvent?.type === 'plan-ready') && (
                     <div className="plan-actions">
-                      <button type="button" className="btn-primary" onClick={() => {
-                        showToast('success', '方案已确认，开始编码')
-                        // 编码已由 orchestrator 自动推进
+                      <button type="button" className="btn-primary" onClick={async () => {
+                        try {
+                          await api.approvePlan(selected.id)
+                          showToast('success', '方案已确认，开始编码')
+                          setThinking(true)
+                          refreshList()
+                        } catch (e: unknown) {
+                          showToast('error', e instanceof Error ? e.message : '确认失败')
+                        }
                       }}>
                         确认方案
                       </button>
-                      <button type="button" className="btn-secondary" onClick={() => {
-                        showToast('success', '方案已驳回，请修改需求后重新运行')
+                      <button type="button" className="btn-secondary" onClick={async () => {
+                        try {
+                          await api.rejectPlan(selected.id)
+                          showToast('success', '方案已驳回，请修改需求后重新运行')
+                          refreshList()
+                        } catch (e: unknown) {
+                          showToast('error', e instanceof Error ? e.message : '驳回失败')
+                        }
                       }}>
                         驳回方案
                       </button>
                     </div>
+                  )}
+                </div>
+              )}
+
+              {tab === 'diff' && (
+                <div className="diff-panel">
+                  {latestEvent?.type === 'diff-ready' && latestEvent.diff ? (
+                    <>
+                      <div className="diff-header">
+                        <h3>代码变更预览</h3>
+                        <p>以下文件将被修改，请确认后提交或撤回。</p>
+                        {latestEvent.files && (
+                          <ul className="diff-file-list">
+                            {latestEvent.files.map((f) => (
+                              <li key={f.path}><code>{f.path}</code> — {f.summary}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                      <pre className="diff-content"><code>{latestEvent.diff}</code></pre>
+                      <div className="plan-actions">
+                        <button type="button" className="btn-primary" onClick={async () => {
+                          try {
+                            await api.commitChanges(selected.id)
+                            showToast('success', '代码已提交，正在应用到源仓库')
+                            setThinking(true)
+                            refreshList()
+                          } catch (e: unknown) {
+                            showToast('error', e instanceof Error ? e.message : '提交失败')
+                          }
+                        }}>
+                          确认提交
+                        </button>
+                        <button type="button" className="btn-secondary" onClick={async () => {
+                          try {
+                            await api.rollbackChanges(selected.id)
+                            showToast('success', '已撤回变更')
+                            refreshList()
+                          } catch (e: unknown) {
+                            showToast('error', e instanceof Error ? e.message : '撤回失败')
+                          }
+                        }}>
+                          撤回变更
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="empty-panel">暂无变更预览。编码并测试通过后，变更内容将显示在此处。</p>
                   )}
                 </div>
               )}

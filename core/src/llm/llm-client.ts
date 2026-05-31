@@ -122,7 +122,7 @@ export class LLMClient {
       outputTokens: data.usage?.completion_tokens ?? 0,
     }
 
-    // Token 追踪
+    // Token 追踪（限制历史长度避免内存泄漏）
     this.tokenHistory.push({
       agent: options?.agent ?? 'unknown',
       inputTokens: usage.inputTokens,
@@ -130,6 +130,9 @@ export class LLMClient {
       latencyMs,
       timestamp: new Date(),
     })
+    if (this.tokenHistory.length > 1000) {
+      this.tokenHistory = this.tokenHistory.slice(-500)
+    }
 
     // 解析 tool_calls（如果有）
     let toolCalls: ToolCall[] | null = null

@@ -114,7 +114,11 @@ export async function runOrchestratorForRequirement(
       pushEvent(requirementId, serializeEvent(event, requirementId))
       logOrchestratorEvent(requirementId, event)
 
-      if (event.type === 'completed' || event.type === 'failed' || event.type === 'waiting-for-pm') {
+      if (event.type === 'completed' || event.type === 'failed' || event.type === 'waiting-for-pm' || event.type === 'plan-ready' || event.type === 'diff-ready') {
+        // waiting-for-pm 时立即释放 runningJobs，让 PM 回复能重新触发流水线
+        if (event.type === 'waiting-for-pm' || event.type === 'plan-ready' || event.type === 'diff-ready') {
+          runningJobs.delete(requirementId)
+        }
         break
       }
     }

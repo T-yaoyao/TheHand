@@ -1,5 +1,5 @@
 import { z } from 'zod';
-export type RequirementStatus = 'idle' | 'clarifying' | 'clarified' | 'planning' | 'plan-approved' | 'plan-rejected' | 'coding' | 'testing' | 'done' | 'failed' | 'reverted';
+export type RequirementStatus = 'idle' | 'clarifying' | 'clarified' | 'planning' | 'plan-approved' | 'plan-rejected' | 'coding' | 'testing' | 'diff-ready' | 'done' | 'failed' | 'reverted';
 export interface Requirement {
     id: string;
     status: RequirementStatus;
@@ -132,6 +132,7 @@ export interface Conversation {
 export interface Lesson {
     id: string;
     projectId: string;
+    requirementId?: string | null;
     phase: string;
     filePath: string | null;
     errorSummary: string;
@@ -175,6 +176,14 @@ export type OrchestratorEvent = {
     plan: FilePlan[];
     requirement: Requirement;
 } | {
+    type: 'diff-ready';
+    requirement: Requirement;
+    diff: string;
+    files: {
+        path: string;
+        summary: string;
+    }[];
+} | {
     type: 'executing';
     phase: string;
     progress: number;
@@ -191,5 +200,6 @@ export type OrchestratorEvent = {
     type: 'failed';
     requirement: Requirement;
     error: string;
+    userMessage?: string;
 };
 //# sourceMappingURL=types.d.ts.map

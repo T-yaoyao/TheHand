@@ -23,7 +23,7 @@ export interface OrchestratorDeps {
 }
 /**
  * 核心调度引擎：状态机驱动的 Agent 调度循环
- * 对标 Claude Code 的 query() AsyncGenerator
+ * 支持多阶段暂停：plan-ready → 用户审批 → coding → diff-ready → 用户确认 → commit
  */
 export declare class Orchestrator {
     private deps;
@@ -31,18 +31,26 @@ export declare class Orchestrator {
     /**
      * 主循环：根据需求状态调度对应 Agent
      * 返回 AsyncGenerator，前端通过 SSE 实时接收事件
+     *
+     * 状态流转：
+     *   idle/clarifying → 澄清 → 方案 → plan-ready（暂停，等审批）
+     *   plan-approved → 编码 → 测试 → diff-ready（暂停，等确认）
+     *   diff-ready → commit → apply → done
      */
     run(requirement: Requirement, projectId?: string): AsyncGenerator<OrchestratorEvent>;
+    /**
+     * 编码+测试阶段（支持从 plan-approved 状态直接进入）
+     */
+    private phaseCoding;
+    /**
+     * 提交+应用阶段（支持从 diff-ready 状态直接进入）
+     */
+    private phaseCommit;
     /**
      * 处理 PM 回复（追问后的继续流程）
      */
     continueWithPMReply(requirement: Requirement, pmReply: string, projectId?: string): AsyncGenerator<OrchestratorEvent>;
-    /**
-     * 将沙箱中的变更应用到源仓库（只有测试通过才调用）
-     */
-    applyChanges(requirement: Requirement, files: string[]): Promise<void>;
     private parsePlan;
-    private parseCodeOutput;
     private isTerminal;
     private selectAgent;
 }

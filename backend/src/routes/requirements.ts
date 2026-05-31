@@ -13,7 +13,7 @@ const sourceRepo = resolve(process.cwd(), '..', 'sandbox-repo', 'conduit-realwor
 
 export const requirementsRouter = Router()
 
-const VALID_STATUSES = ['idle', 'clarifying', 'clarified', 'waiting-for-pm', 'planning', 'plan-approved', 'plan-rejected', 'coding', 'testing', 'done', 'failed']
+const VALID_STATUSES = ['idle', 'clarifying', 'clarified', 'waiting-for-pm', 'planning', 'plan-approved', 'plan-rejected', 'coding', 'testing', 'diff-ready', 'done', 'failed', 'reverted']
 
 /**
  * POST /api/requirements — 创建需求
@@ -164,6 +164,8 @@ requirementsRouter.delete('/:id', (req: Request, res: Response) => {
   try {
     execute('DELETE FROM conversations WHERE requirement_id = ?', [id])
     execute('DELETE FROM executions WHERE requirement_id = ?', [id])
+    execute('DELETE FROM change_history WHERE requirement_id = ?', [id])
+    execute('DELETE FROM lessons WHERE requirement_id = ?', [id])
     execute('DELETE FROM requirements WHERE id = ?', [id])
     res.json({ ok: true })
   } catch (e: any) {
@@ -224,4 +226,116 @@ requirementsRouter.post('/:id/revert', async (req: Request, res: Response) => {
     log.error(`[api] 需求撤回失败 id=${id.slice(0, 8)}…`, e.message)
     res.status(500).json({ error: `撤回失败: ${e.message}` })
   }
+})
+
+/**
+ * POST /api/requirements/:id/approve-plan — 确认方案，触发编码阶段
+ */
+requirementsRouter.post('/:id/approve-plan', async (req: Request, res: Response) => {
+  const id = req.params.id as string
+
+  const requirement = queryOne('SELECT * FROM requirements WHERE id = ?', [id]) as { status: string } | undefined
+  if (!requirement) {
+    res.status(404).json({ error: '需求不存在' })
+    return
+  }
+  if (requirement.status !== 'plan-approved') {
+    res.status(400).json({ error: `当前状态 ${requirement.status} 不可确认方案` })
+    return
+  }
+
+  log.info(`[api] 确认方案 id=${id.slice(0, 8)}…`)
+  try {
+    await runOrchestratorForRequirement(id)
+  } catch (e: any) {
+    if (e.message?.includes('正在运行中')) {
+      res.status(409).json({ error: '该需求正在运行中' })
+      return
+    }
+    log.error('[api] 确认方案触发失败:', e.message)
+  }
+
+  res.json({ ok: true })
+})
+
+/**
+ * POST /api/requirements/:id/reject-plan — 驳回方案
+ */
+requirementsRouter.post('/:id/reject-plan', (req: Request, res: Response) => {
+  const id = req.params.id as string
+  const { reason } = req.body ?? {}
+
+  const requirement = queryOne('SELECT * FROM requirements WHERE id = ?', [id]) as { status: string } | undefined
+  if (!requirement) {
+    res.status(404).json({ error: '需求不存在' })
+    return
+  }
+  if (requirement.status !== 'plan-approved') {
+    res.status(400).json({ error: `当前状态 ${requirement.status} 不可驳回` })
+    return
+  }
+
+  execute(`UPDATE requirements SET status = 'plan-rejected', updated_at = datetime('now') WHERE id = ?`, [id])
+
+  if (reason) {
+    execute(
+      `INSERT INTO conversations (id, requirement_id, role, content, round) VALUES (?, ?, 'pm', ?, 0)`,
+      [randomUUID(), id, `[驳回方案] ${reason}`],
+    )
+  }
+
+  log.info(`[api] 驳回方案 id=${id.slice(0, 8)}…`)
+  res.json({ ok: true })
+})
+
+/**
+ * POST /api/requirements/:id/commit — 确认提交代码变更
+ */
+requirementsRouter.post('/:id/commit', async (req: Request, res: Response) => {
+  const id = req.params.id as string
+
+  const requirement = queryOne('SELECT * FROM requirements WHERE id = ?', [id]) as { status: string } | undefined
+  if (!requirement) {
+    res.status(404).json({ error: '需求不存在' })
+    return
+  }
+  if (requirement.status !== 'diff-ready') {
+    res.status(400).json({ error: `当前状态 ${requirement.status} 不可提交` })
+    return
+  }
+
+  log.info(`[api] 确认提交 id=${id.slice(0, 8)}…`)
+  try {
+    await runOrchestratorForRequirement(id)
+  } catch (e: any) {
+    if (e.message?.includes('正在运行中')) {
+      res.status(409).json({ error: '该需求正在运行中' })
+      return
+    }
+    log.error('[api] 确认提交触发失败:', e.message)
+  }
+
+  res.json({ ok: true })
+})
+
+/**
+ * POST /api/requirements/:id/rollback — 撤回沙箱中的代码变更
+ */
+requirementsRouter.post('/:id/rollback', (req: Request, res: Response) => {
+  const id = req.params.id as string
+
+  const requirement = queryOne('SELECT * FROM requirements WHERE id = ?', [id]) as { status: string } | undefined
+  if (!requirement) {
+    res.status(404).json({ error: '需求不存在' })
+    return
+  }
+  if (requirement.status !== 'diff-ready') {
+    res.status(400).json({ error: `当前状态 ${requirement.status} 不可撤回` })
+    return
+  }
+
+  execute(`UPDATE requirements SET status = 'coding', updated_at = datetime('now') WHERE id = ?`, [id])
+
+  log.info(`[api] 撤回变更 id=${id.slice(0, 8)}…`)
+  res.json({ ok: true })
 })

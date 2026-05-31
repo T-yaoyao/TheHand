@@ -5,10 +5,13 @@ import { log } from '../logger.js';
  * 为前端提供实时状态推送
  */
 export const eventsRouter = Router();
-// 存储活跃的 SSE 连接
+// 存储活跃的 SSE 连接（支持同一 requirement 多个标签页）
 const clients = new Map();
 export function getActiveConnectionCount() {
-    return clients.size;
+    let count = 0;
+    for (const set of clients.values())
+        count += set.size;
+    return count;
 }
 /**
  * GET /api/events/:id — 订阅需求的实时事件 (SSE)
@@ -24,18 +27,29 @@ eventsRouter.get('/:id', (req, res) => {
     });
     // 发送初始连接确认
     res.write(`data: ${JSON.stringify({ type: 'connected', requirementId })}\n\n`);
-    // 存储连接
-    clients.set(requirementId, res);
-    log.info(`[sse] 连接 requirement=${requirementId.slice(0, 8)}… (共 ${clients.size} 路)`);
+    // 存储连接（支持多标签页）
+    if (!clients.has(requirementId)) {
+        clients.set(requirementId, new Set());
+    }
+    clients.get(requirementId).add(res);
+    log.info(`[sse] 连接 requirement=${requirementId.slice(0, 8)}… (共 ${getActiveConnectionCount()} 路)`);
     // 心跳保活
     const heartbeat = setInterval(() => {
-        res.write(':heartbeat\n\n');
+        try {
+            res.write(':heartbeat\n\n');
+        }
+        catch { }
     }, 15000);
     // 清理
     req.on('close', () => {
         clearInterval(heartbeat);
-        clients.delete(requirementId);
-        log.info(`[sse] 断开 requirement=${requirementId.slice(0, 8)}… (剩余 ${clients.size} 路)`);
+        const set = clients.get(requirementId);
+        if (set) {
+            set.delete(res);
+            if (set.size === 0)
+                clients.delete(requirementId);
+        }
+        log.info(`[sse] 断开 requirement=${requirementId.slice(0, 8)}… (剩余 ${getActiveConnectionCount()} 路)`);
     });
 });
 /**
@@ -45,10 +59,16 @@ eventsRouter.get('/:id', (req, res) => {
 eventsRouter.post('/:id', (req, res) => {
     const requirementId = req.params.id;
     const event = req.body;
-    const client = clients.get(requirementId);
-    if (client) {
-        client.write(`data: ${JSON.stringify(event)}\n\n`);
-        res.json({ ok: true, delivered: true });
+    const set = clients.get(requirementId);
+    if (set && set.size > 0) {
+        const data = `data: ${JSON.stringify(event)}\n\n`;
+        for (const client of set) {
+            try {
+                client.write(data);
+            }
+            catch { }
+        }
+        res.json({ ok: true, delivered: set.size });
     }
     else {
         res.json({ ok: true, delivered: false, message: '无活跃订阅者' });
@@ -59,17 +79,34 @@ eventsRouter.post('/:id', (req, res) => {
  */
 export function broadcastEvent(event) {
     const data = `data: ${JSON.stringify(event)}\n\n`;
-    for (const client of clients.values()) {
-        client.write(data);
+    for (const [id, set] of clients) {
+        for (const client of set) {
+            try {
+                client.write(data);
+            }
+            catch {
+                set.delete(client);
+            }
+        }
+        if (set.size === 0)
+            clients.delete(id);
     }
 }
 /**
  * 向指定需求推送事件
  */
 export function pushEvent(requirementId, event) {
-    const client = clients.get(requirementId);
-    if (client) {
-        client.write(`data: ${JSON.stringify(event)}\n\n`);
+    const set = clients.get(requirementId);
+    if (set && set.size > 0) {
+        const data = `data: ${JSON.stringify(event)}\n\n`;
+        for (const client of set) {
+            try {
+                client.write(data);
+            }
+            catch {
+                set.delete(client);
+            }
+        }
     }
 }
 //# sourceMappingURL=events.js.map

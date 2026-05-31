@@ -3,10 +3,11 @@ import { statusLabel } from '../utils/status'
 
 const PIPELINE = [
   { keys: ['clarifying', 'clarified'], label: '澄清' },
-  { keys: ['planning', 'plan-approved'], label: '方案' },
+  { keys: ['planning', 'plan-approved', 'plan-rejected'], label: '方案' },
   { keys: ['coding'], label: '编码' },
   { keys: ['testing'], label: '测试' },
-  { keys: ['done'], label: '完成' },
+  { keys: ['diff-ready'], label: '确认' },
+  { keys: ['done', 'reverted'], label: '完成' },
 ]
 
 interface StatusFlowProps {
@@ -97,7 +98,7 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
 
       {latestEvent?.type === 'plan-ready' && latestEvent.plan && (
         <div className="alert alert-info">
-          <strong>方案就绪</strong>
+          <strong>方案就绪</strong> — 请前往「方案」Tab 审批
           <ul>
             {latestEvent.plan.map((f) => (
               <li key={f.path}>
@@ -105,6 +106,12 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {latestEvent?.type === 'diff-ready' && (
+        <div className="alert alert-info">
+          <strong>代码变更就绪</strong> — 请前往「变更预览」Tab 确认提交
         </div>
       )}
 
@@ -117,11 +124,12 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
       {latestEvent?.type === 'failed' && (
         <div className="alert alert-error">
           <strong>失败</strong>
-          <p>{latestEvent.error}</p>
-          {onReconnect && (
-            <button type="button" className="btn-secondary btn-sm" onClick={onReconnect} style={{ marginTop: 8 }}>
-              重试
-            </button>
+          <p>{latestEvent.userMessage ?? latestEvent.error}</p>
+          {latestEvent.userMessage && latestEvent.error && (
+            <details style={{ marginTop: 8 }}>
+              <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--text-muted)' }}>技术详情</summary>
+              <pre style={{ fontSize: 11, marginTop: 4, whiteSpace: 'pre-wrap' }}>{latestEvent.error}</pre>
+            </details>
           )}
         </div>
       )}

@@ -3,14 +3,20 @@ import { queryAll, queryOne, execute } from './db.js'
 import { randomUUID } from 'crypto'
 
 function rowToRequirement(row: Record<string, unknown>): Requirement {
+  let structuredRequirement = null
+  let plan = null
+  if (row.structured_requirement) {
+    try { structuredRequirement = JSON.parse(row.structured_requirement as string) } catch { structuredRequirement = null }
+  }
+  if (row.plan) {
+    try { plan = JSON.parse(row.plan as string) } catch { plan = null }
+  }
   return {
     id: row.id as string,
     status: row.status as Requirement['status'],
     pmInput: row.pm_input as string,
-    structuredRequirement: row.structured_requirement
-      ? JSON.parse(row.structured_requirement as string)
-      : null,
-    plan: row.plan ? JSON.parse(row.plan as string) : null,
+    structuredRequirement,
+    plan,
     createdAt: new Date(row.created_at as string),
     updatedAt: new Date(row.updated_at as string),
   }
@@ -31,6 +37,7 @@ function rowToLesson(row: Record<string, unknown>): Lesson {
   return {
     id: row.id as string,
     projectId: row.project_id as string,
+    requirementId: (row.requirement_id as string) ?? null,
     phase: row.phase as string,
     filePath: (row.file_path as string) ?? null,
     errorSummary: row.error_summary as string,
@@ -93,10 +100,11 @@ export class DbRequirementMemory {
 
   async saveLesson(lesson: Lesson): Promise<void> {
     execute(
-      `INSERT INTO lessons (id, project_id, phase, file_path, error_summary, error_detail, fix_hint, resolved) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO lessons (id, project_id, requirement_id, phase, file_path, error_summary, error_detail, fix_hint, resolved) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         lesson.id || randomUUID(),
         lesson.projectId,
+        lesson.requirementId ?? null,
         lesson.phase,
         lesson.filePath,
         lesson.errorSummary,

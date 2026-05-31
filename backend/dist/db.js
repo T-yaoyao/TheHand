@@ -59,6 +59,37 @@ export async function initDB() {
       FOREIGN KEY (requirement_id) REFERENCES requirements(id)
     )
   `);
+    db.run(`
+    CREATE TABLE IF NOT EXISTS lessons (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      requirement_id TEXT,
+      phase TEXT NOT NULL,
+      file_path TEXT,
+      error_summary TEXT NOT NULL,
+      error_detail TEXT,
+      fix_hint TEXT,
+      resolved INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+    db.run(`
+    CREATE TABLE IF NOT EXISTS change_history (
+      id TEXT PRIMARY KEY,
+      requirement_id TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      action TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (requirement_id) REFERENCES requirements(id)
+    )
+  `);
+    // 迁移：给 lessons 表添加 requirement_id 列（兼容旧数据库）
+    try {
+        db.run(`ALTER TABLE lessons ADD COLUMN requirement_id TEXT`);
+    }
+    catch {
+        // 列已存在，忽略
+    }
     saveDB();
     return db;
 }
