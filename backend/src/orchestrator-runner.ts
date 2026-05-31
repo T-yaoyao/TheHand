@@ -14,6 +14,7 @@ import {
 } from '@thehand/core'
 import type { OrchestratorEvent } from '@thehand/core'
 import { DbRequirementMemory, loadRequirementFromDb } from './db-requirement-memory.js'
+import { execute } from './db.js'
 import { pushEvent } from './routes/events.js'
 import { log } from './logger.js'
 
@@ -126,6 +127,8 @@ export async function runOrchestratorForRequirement(
     )
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e)
+    // 将失败状态写入数据库（确保前端 refreshList 能获取到 failed 状态）
+    execute(`UPDATE requirements SET status = 'failed', updated_at = datetime('now') WHERE id = ?`, [requirementId])
     pushEvent(requirementId, {
       type: 'failed',
       requirement: { id: requirementId, status: 'failed' },

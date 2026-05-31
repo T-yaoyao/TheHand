@@ -76,7 +76,10 @@ export function App() {
 
   useEffect(() => {
     if (!latestEvent || !selected) return
-    if (latestEvent.type === 'plan-ready') setTab('plan')
+    if (latestEvent.type === 'plan-ready') {
+      setTab('plan')
+      refreshList()
+    }
     if (latestEvent.type === 'waiting-for-pm') {
       setTab('chat')
       setThinking(false)
