@@ -135,19 +135,22 @@ export class Orchestrator {
       // 4. 方案阶段（自愈重试，最多 5 轮）
       yield { type: 'status-change', status: 'planning', agent: 'plan' }
 
-      // 如果是删除操作，查询相关实体的变更历史（精准定位需要删除的文件）
+      // 如果是删除操作，查询相关变更历史（精准定位需要删除的文件）
       let deleteHistoryHint = ''
       const reqType = requirement.structuredRequirement?.type
       if (reqType === 'delete_page' || reqType === 'delete_field') {
-        const entity = requirement.structuredRequirement?.entity ?? ''
-        if (entity && 'findChangesByEntity' in requirementMemory) {
-          const history = await (requirementMemory as any).findChangesByEntity(entity)
-          if (history.length > 0) {
-            const allFiles = new Set<string>()
+        // 用 pm_input 的关键词搜索变更历史（不依赖 entity 字段的精确匹配）
+        const keywords = requirement.pmInput.replace(/[^一-龥a-zA-Z0-9]/g, ' ').split(/\s+/).filter(w => w.length >= 2)
+        if (keywords.length > 0 && 'findChangesByEntity' in requirementMemory) {
+          const allFiles = new Set<string>()
+          for (const keyword of keywords.slice(0, 3)) {
+            const history = await (requirementMemory as any).findChangesByEntity(keyword)
             for (const h of history) {
               for (const f of h.files) allFiles.add(f.filePath)
             }
-            deleteHistoryHint = `\n\n## 该实体的历史变更文件（必须全部处理）\n以下是创建/修改该实体时涉及的所有文件，删除操作必须覆盖这些文件：\n${Array.from(allFiles).map(f => `- ${f}`).join('\n')}`
+          }
+          if (allFiles.size > 0) {
+            deleteHistoryHint = `\n\n## 该需求涉及的历史变更文件（必须全部处理）\n以下是之前创建/修改时涉及的所有文件，删除操作必须覆盖这些文件：\n${Array.from(allFiles).map(f => `- ${f}`).join('\n')}`
           }
         }
       }

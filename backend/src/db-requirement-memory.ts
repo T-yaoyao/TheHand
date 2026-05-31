@@ -148,13 +148,13 @@ export class DbRequirementMemory {
   }
 
   async findChangesByEntity(entity: string): Promise<{ requirementId: string; files: ChangeRecord[] }[]> {
-    // 查找与某个实体（如 AboutUs）相关的所有变更历史
+    // 通过原始需求描述（pm_input）匹配，找到创建该实体时涉及的所有文件
     const rows = queryAll(
-      `SELECT ch.*, r.pm_input FROM change_history ch
+      `SELECT ch.* FROM change_history ch
        JOIN requirements r ON ch.requirement_id = r.id
-       WHERE ch.file_path LIKE '%' || ? || '%'
+       WHERE r.pm_input LIKE '%' || ? || '%'
        ORDER BY ch.created_at DESC
-       LIMIT 20`,
+       LIMIT 50`,
       [entity],
     )
     const grouped = new Map<string, ChangeRecord[]>()
