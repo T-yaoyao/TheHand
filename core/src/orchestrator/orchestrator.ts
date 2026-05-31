@@ -152,7 +152,7 @@ export class Orchestrator {
         }
       }
 
-      const MAX_RETRIES = 5
+      const MAX_RETRIES = 3
       let plan: FilePlan[] = []
       const planErrors: string[] = []
 
