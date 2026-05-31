@@ -50,7 +50,10 @@ export function App() {
       const current = selectedRef.current
       if (current) {
         const updated = list.find((r) => r.id === current.id)
-        if (updated) setSelected(updated)
+        // 仅在数据实际变化时更新（避免对象引用变化触发无限循环）
+        if (updated && (updated.status !== current.status || updated.plan !== current.plan || updated.structured_requirement !== current.structured_requirement)) {
+          setSelected(updated)
+        }
       }
     } catch (e: unknown) {
       setLoadingList(false)
@@ -90,7 +93,7 @@ export function App() {
       refreshList()
       setThinking(false)
     }
-  }, [latestEvent, selected, refreshList])
+  }, [latestEvent, selected?.id, refreshList])
 
   const handleCreate = async () => {
     if (!newInput.trim()) return
