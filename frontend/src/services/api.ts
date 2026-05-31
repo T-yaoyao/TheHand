@@ -94,4 +94,12 @@ export const api = {
     })
     return handleResponse(res)
   },
+
+  async revertRequirement(requirementId: string): Promise<{ ok: boolean; revertedCommit: string }> {
+    const res = await fetch(`${BASE}/requirements/${requirementId}/revert`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    return handleResponse(res)
+  },
 }

@@ -76,14 +76,34 @@ export class Orchestrator {
             yield { type: 'status-change', status: 'clarified', agent: 'clarification' };
             // 4. 方案阶段（自愈重试，最多 5 轮）
             yield { type: 'status-change', status: 'planning', agent: 'plan' };
+            // 如果是删除操作，查询相关实体的变更历史（精准定位需要删除的文件）
+            let deleteHistoryHint = '';
+            const reqType = requirement.structuredRequirement?.type;
+            if (reqType === 'delete_page' || reqType === 'delete_field') {
+                const entity = requirement.structuredRequirement?.entity ?? '';
+                if (entity && 'findChangesByEntity' in requirementMemory) {
+                    const history = await requirementMemory.findChangesByEntity(entity);
+                    if (history.length > 0) {
+                        const allFiles = new Set();
+                        for (const h of history) {
+                            for (const f of h.files)
+                                allFiles.add(f.filePath);
+                        }
+                        deleteHistoryHint = `\n\n## 该实体的历史变更文件（必须全部处理）\n以下是创建/修改该实体时涉及的所有文件，删除操作必须覆盖这些文件：\n${Array.from(allFiles).map(f => `- ${f}`).join('\n')}`;
+                    }
+                }
+            }
             const MAX_RETRIES = 5;
             let plan = [];
             const planErrors = [];
             for (let planAttempt = 1; planAttempt <= MAX_RETRIES; planAttempt++) {
                 yield { type: 'executing', phase: `planning (attempt ${planAttempt}/${MAX_RETRIES})`, progress: 20 };
-                const planInput = planErrors.length > 0
+                let planInput = planErrors.length > 0
                     ? requirement.pmInput + '\n\n## 上轮方案生成失败\n' + planErrors[planErrors.length - 1] + '\n请修正后重新生成方案。'
                     : requirement.pmInput;
+                if (deleteHistoryHint) {
+                    planInput += deleteHistoryHint;
+                }
                 const planContext = {
                     requirement: { ...requirement, pmInput: planInput },
                     projectContext,
@@ -252,6 +272,13 @@ export class Orchestrator {
             }
             // 编码循环成功退出后，获取最终的 validOutputs 用于后续步骤
             const validOutputs = codeOutputs.filter(f => f.path && f.content);
+            // 保存变更历史（供未来删除操作精准定位文件）
+            if ('saveChanges' in requirementMemory) {
+                await requirementMemory.saveChanges(requirement.id, validOutputs.map(f => ({
+                    path: f.path,
+                    action: f.content.trim().includes('__DELETE__') ? 'deleted' : 'created',
+                })));
+            }
             // 7. Diff 检查
             yield { type: 'executing', phase: 'diff-check', progress: 80 };
             const changedFiles = await repoManager.getChangedFiles();

@@ -22,6 +22,7 @@ export function App() {
   const [sending, setSending] = useState(false)
   const [running, setRunning] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [reverting, setReverting] = useState(false)
   const [loadingList, setLoadingList] = useState(true)
   const [tab, setTab] = useState<Tab>('progress')
   const [toast, setToast] = useState<{ type: 'error' | 'success'; msg: string } | null>(null)
@@ -169,6 +170,26 @@ export function App() {
     })
   }
 
+  const handleRevert = async () => {
+    if (!selected) return
+    setConfirmDialog({
+      message: '确定撤回该需求的代码变更？将执行 git revert 回退代码。',
+      onConfirm: async () => {
+        setConfirmDialog(null)
+        setReverting(true)
+        try {
+          const result = await api.revertRequirement(selected.id)
+          showToast('success', `已撤回 commit ${result.revertedCommit}`)
+          refreshList()
+        } catch (e: unknown) {
+          showToast('error', e instanceof Error ? e.message : '撤回失败')
+        } finally {
+          setReverting(false)
+        }
+      },
+    })
+  }
+
   const plan = parseJsonField<FilePlan[]>(selected?.plan ?? null)
   const structured = parseJsonField<unknown>(selected?.structured_requirement ?? null)
   const livePlan = latestEvent?.type === 'plan-ready' ? latestEvent.plan : null
@@ -254,6 +275,11 @@ export function App() {
                 <button type="button" className="btn-danger" onClick={handleDelete} disabled={deleting}>
                   {deleting ? '删除中…' : '删除'}
                 </button>
+                {selected.status === 'done' && (
+                  <button type="button" className="btn-secondary" onClick={handleRevert} disabled={reverting}>
+                    {reverting ? '撤回中…' : '撤回'}
+                  </button>
+                )}
               </div>
             </header>
 

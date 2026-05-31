@@ -81,6 +81,17 @@ export async function initDB(): Promise<Database> {
     )
   `)
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS change_history (
+      id TEXT PRIMARY KEY,
+      requirement_id TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      action TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (requirement_id) REFERENCES requirements(id)
+    )
+  `)
+
   saveDB()
   return db
 }

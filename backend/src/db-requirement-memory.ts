@@ -1,4 +1,4 @@
-import type { Requirement, Conversation, Lesson, MemoryContext, ProjectContext } from '@thehand/core'
+import type { Requirement, Conversation, Lesson, ChangeRecord, MemoryContext, ProjectContext } from '@thehand/core'
 import { queryAll, queryOne, execute } from './db.js'
 import { randomUUID } from 'crypto'
 
@@ -122,6 +122,54 @@ export class DbRequirementMemory {
 
   async markLessonResolved(id: string): Promise<void> {
     execute(`UPDATE lessons SET resolved = 1 WHERE id = ?`, [id])
+  }
+
+  async saveChanges(requirementId: string, files: { path: string; action: 'created' | 'modified' | 'deleted' }[]): Promise<void> {
+    for (const file of files) {
+      execute(
+        `INSERT INTO change_history (id, requirement_id, file_path, action) VALUES (?, ?, ?, ?)`,
+        [randomUUID(), requirementId, file.path, file.action],
+      )
+    }
+  }
+
+  async getChanges(requirementId: string): Promise<ChangeRecord[]> {
+    const rows = queryAll(
+      `SELECT * FROM change_history WHERE requirement_id = ? ORDER BY created_at ASC`,
+      [requirementId],
+    )
+    return rows.map((row: Record<string, unknown>) => ({
+      id: row.id as string,
+      requirementId: row.requirement_id as string,
+      filePath: row.file_path as string,
+      action: row.action as ChangeRecord['action'],
+      createdAt: new Date(row.created_at as string),
+    }))
+  }
+
+  async findChangesByEntity(entity: string): Promise<{ requirementId: string; files: ChangeRecord[] }[]> {
+    // 查找与某个实体（如 AboutUs）相关的所有变更历史
+    const rows = queryAll(
+      `SELECT ch.*, r.pm_input FROM change_history ch
+       JOIN requirements r ON ch.requirement_id = r.id
+       WHERE ch.file_path LIKE '%' || ? || '%'
+       ORDER BY ch.created_at DESC
+       LIMIT 20`,
+      [entity],
+    )
+    const grouped = new Map<string, ChangeRecord[]>()
+    for (const row of rows) {
+      const reqId = row.requirement_id as string
+      if (!grouped.has(reqId)) grouped.set(reqId, [])
+      grouped.get(reqId)!.push({
+        id: row.id as string,
+        requirementId: reqId,
+        filePath: row.file_path as string,
+        action: row.action as ChangeRecord['action'],
+        createdAt: new Date(row.created_at as string),
+      })
+    }
+    return Array.from(grouped.entries()).map(([requirementId, files]) => ({ requirementId, files }))
   }
 
   async getContext(requirementId: string, projectContext: ProjectContext): Promise<MemoryContext> {

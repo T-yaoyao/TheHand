@@ -1,9 +1,15 @@
 import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { randomUUID } from 'crypto'
+import { exec } from 'child_process'
+import { promisify } from 'util'
+import { resolve } from 'path'
 import { queryAll, queryOne, execute } from '../db.js'
 import { isOrchestratorRunning, runOrchestratorForRequirement } from '../orchestrator-runner.js'
 import { log } from '../logger.js'
+
+const execAsync = promisify(exec)
+const sourceRepo = resolve(process.cwd(), '..', 'sandbox-repo', 'conduit-realworld-example-app')
 
 export const requirementsRouter = Router()
 
@@ -162,5 +168,51 @@ requirementsRouter.delete('/:id', (req: Request, res: Response) => {
     res.json({ ok: true })
   } catch (e: any) {
     res.status(500).json({ error: `删除失败: ${e.message}` })
+  }
+})
+
+/**
+ * POST /api/requirements/:id/revert — 撤回需求的代码变更
+ */
+requirementsRouter.post('/:id/revert', async (req: Request, res: Response) => {
+  const id = req.params.id as string
+
+  const requirement = queryOne('SELECT * FROM requirements WHERE id = ?', [id])
+  if (!requirement) {
+    res.status(404).json({ error: '需求不存在' })
+    return
+  }
+
+  if (requirement.status !== 'done') {
+    res.status(400).json({ error: '只有已完成的需求可以撤回' })
+    return
+  }
+
+  try {
+    // 在 git log 中查找包含需求描述的 commit
+    const pmInput = (requirement.pm_input as string).slice(0, 50)
+    const { stdout: logOutput } = await execAsync(
+      `git log --oneline --all -20 --grep="${pmInput.replace(/"/g, '\\"')}"`,
+      { cwd: sourceRepo },
+    )
+
+    const commits = logOutput.trim().split('\n').filter(Boolean)
+    if (commits.length === 0) {
+      res.status(400).json({ error: '未找到该需求对应的 git commit，无法撤回' })
+      return
+    }
+
+    // revert 最新的 commit
+    const commitHash = commits[0].split(' ')[0]
+    await execAsync(`git revert --no-edit ${commitHash}`, { cwd: sourceRepo })
+
+    // 更新需求状态
+    execute(`UPDATE requirements SET status = 'reverted', updated_at = datetime('now') WHERE id = ?`, [id])
+
+    log.info(`[api] 需求撤回 id=${id.slice(0, 8)}… commit=${commitHash}`)
+    res.json({ ok: true, revertedCommit: commitHash })
+  } catch (e: any) {
+    log.error(`[api] 需求撤回失败 id=${id.slice(0, 8)}…`, e.message)
+    res.status(500).json({ error: `撤回失败: ${e.message}` })
   }
 })

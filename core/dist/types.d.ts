@@ -1,5 +1,5 @@
 import { z } from 'zod';
-export type RequirementStatus = 'idle' | 'clarifying' | 'clarified' | 'planning' | 'plan-approved' | 'plan-rejected' | 'coding' | 'testing' | 'done' | 'failed';
+export type RequirementStatus = 'idle' | 'clarifying' | 'clarified' | 'planning' | 'plan-approved' | 'plan-rejected' | 'coding' | 'testing' | 'done' | 'failed' | 'reverted';
 export interface Requirement {
     id: string;
     status: RequirementStatus;
@@ -138,6 +138,13 @@ export interface Lesson {
     errorDetail: string | null;
     fixHint: string | null;
     resolved: boolean;
+    createdAt: Date;
+}
+export interface ChangeRecord {
+    id: string;
+    requirementId: string;
+    filePath: string;
+    action: 'created' | 'modified' | 'deleted';
     createdAt: Date;
 }
 export interface ExecutionRecord {
