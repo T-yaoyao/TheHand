@@ -1,4 +1,4 @@
-import type { Requirement, Conversation, Lesson, MemoryContext, ProjectContext } from '../types.js';
+import type { Requirement, Conversation, Lesson, ChangeRecord, MemoryContext, ProjectContext } from '../types.js';
 /**
  * 需求记忆：管理结构化需求 JSON 和对话历史
  * 对标 Claude Code 的 Session Memory
@@ -24,5 +24,13 @@ export declare class RequirementMemory {
      * 当对话过长时，用结构化需求 JSON 作为摘要
      */
     compactIfNeeded(requirementId: string): Promise<void>;
+    saveChanges(_requirementId: string, _files: {
+        path: string;
+        action: 'created' | 'modified' | 'deleted';
+    }[]): Promise<void>;
+    findChangesByEntity(_keyword: string): Promise<{
+        requirementId: string;
+        files: ChangeRecord[];
+    }[]>;
 }
 //# sourceMappingURL=requirement-memory.d.ts.map

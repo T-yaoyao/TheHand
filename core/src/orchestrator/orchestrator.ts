@@ -156,10 +156,10 @@ export class Orchestrator {
       const reqType = requirement.structuredRequirement?.type
       if (reqType === 'delete_page' || reqType === 'delete_field') {
         const keywords = requirement.pmInput.replace(/[^一-龥a-zA-Z0-9]/g, ' ').split(/\s+/).filter(w => w.length >= 2)
-        if (keywords.length > 0 && 'findChangesByEntity' in requirementMemory) {
+        if (keywords.length > 0 && typeof requirementMemory.findChangesByEntity === 'function') {
           const allFiles = new Set<string>()
           for (const keyword of keywords.slice(0, 3)) {
-            const history = await (requirementMemory as any).findChangesByEntity(keyword)
+            const history = await requirementMemory.findChangesByEntity(keyword)
             for (const h of history) {
               for (const f of h.files) allFiles.add(f.filePath)
             }
@@ -410,8 +410,8 @@ export class Orchestrator {
     // 编码成功 → 保存变更历史
     const validOutputs = codeOutputs.filter(f => f.path && f.content)
 
-    if ('saveChanges' in requirementMemory) {
-      await (requirementMemory as any).saveChanges(
+    if (typeof requirementMemory.saveChanges === 'function') {
+      await requirementMemory.saveChanges(
         requirement.id,
         validOutputs.map(f => ({
           path: f.path,

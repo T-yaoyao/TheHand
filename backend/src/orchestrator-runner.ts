@@ -14,7 +14,7 @@ import {
 } from '@thehand/core'
 import type { OrchestratorEvent } from '@thehand/core'
 import { DbRequirementMemory, loadRequirementFromDb } from './db-requirement-memory.js'
-import { execute } from './db.js'
+import { execute, queryOne } from './db.js'
 import { pushEvent } from './routes/events.js'
 import { log } from './logger.js'
 
@@ -47,7 +47,7 @@ async function getDeps() {
         createShellTool(sandboxSource),
       ]
 
-      const agentRunner = new AgentRunner(llmClient, tools)
+      const agentRunner = new AgentRunner(llmClient, tools, sandboxSource)
       const skillRegistry = new SkillRegistry()
       skillRegistry.setLLMClient(llmClient)
       await skillRegistry.discover(resolve(repoRoot, 'projects/conduit'))
@@ -131,11 +131,15 @@ export async function runOrchestratorForRequirement(
     )
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e)
-    // 将失败状态写入数据库（确保前端 refreshList 能获取到 failed 状态）
-    execute(`UPDATE requirements SET status = 'failed', updated_at = datetime('now') WHERE id = ?`, [requirementId])
+    // 仅在状态未终态时覆盖为 failed（避免编排器已完成但清理沙箱时异常导致误标 failed）
+    const current = queryOne('SELECT status FROM requirements WHERE id = ?', [requirementId]) as { status: string } | undefined
+    const currentStatus = current?.status ?? ''
+    if (currentStatus !== 'done' && currentStatus !== 'failed') {
+      execute(`UPDATE requirements SET status = 'failed', updated_at = datetime('now') WHERE id = ?`, [requirementId])
+    }
     pushEvent(requirementId, {
       type: 'failed',
-      requirement: { id: requirementId, status: 'failed' },
+      requirement: { id: requirementId, status: currentStatus === 'done' ? 'done' : 'failed' },
       error: message,
     })
     log.error(`[orchestrator] 异常 id=${requirementId.slice(0, 8)}…`, message)

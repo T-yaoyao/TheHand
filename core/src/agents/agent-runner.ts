@@ -14,6 +14,7 @@ export class AgentRunner {
   constructor(
     private llmClient: LLMClient,
     private toolPool: Tool[],
+    private sandboxPath: string = '',
   ) {}
 
   /**
@@ -84,7 +85,7 @@ export class AgentRunner {
                 toolResult = `参数校验失败: ${parsed.error?.message ?? '未知错误'}。请使用正确的参数格式重试。`
               } else {
                 const result = await tool.call(parsed.data, {
-                  sandboxPath: '',
+                  sandboxPath: this.sandboxPath,
                   backupStore: {
                     save: async () => {},
                     restore: async () => null,

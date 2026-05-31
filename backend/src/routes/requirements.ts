@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto'
 import { exec } from 'child_process'
 import { promisify } from 'util'
 import { resolve } from 'path'
-import { queryAll, queryOne, execute } from '../db.js'
+import { queryAll, queryOne, execute, executeBatch } from '../db.js'
 import { isOrchestratorRunning, runOrchestratorForRequirement } from '../orchestrator-runner.js'
 import { log } from '../logger.js'
 
@@ -162,11 +162,13 @@ requirementsRouter.get('/:id/conversations', (req: Request, res: Response) => {
 requirementsRouter.delete('/:id', (req: Request, res: Response) => {
   const id = req.params.id
   try {
-    execute('DELETE FROM conversations WHERE requirement_id = ?', [id])
-    execute('DELETE FROM executions WHERE requirement_id = ?', [id])
-    execute('DELETE FROM change_history WHERE requirement_id = ?', [id])
-    execute('DELETE FROM lessons WHERE requirement_id = ?', [id])
-    execute('DELETE FROM requirements WHERE id = ?', [id])
+    executeBatch([
+      { sql: 'DELETE FROM conversations WHERE requirement_id = ?', params: [id] },
+      { sql: 'DELETE FROM executions WHERE requirement_id = ?', params: [id] },
+      { sql: 'DELETE FROM change_history WHERE requirement_id = ?', params: [id] },
+      { sql: 'DELETE FROM lessons WHERE requirement_id = ?', params: [id] },
+      { sql: 'DELETE FROM requirements WHERE id = ?', params: [id] },
+    ])
     res.json({ ok: true })
   } catch (e: any) {
     res.status(500).json({ error: `删除失败: ${e.message}` })

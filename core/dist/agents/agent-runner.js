@@ -5,9 +5,11 @@
 export class AgentRunner {
     llmClient;
     toolPool;
-    constructor(llmClient, toolPool) {
+    sandboxPath;
+    constructor(llmClient, toolPool, sandboxPath = '') {
         this.llmClient = llmClient;
         this.toolPool = toolPool;
+        this.sandboxPath = sandboxPath;
     }
     /**
      * 执行指定 Agent：循环调用 LLM → 提取 tool_use → 执行工具 → 循环
@@ -68,7 +70,7 @@ export class AgentRunner {
                             }
                             else {
                                 const result = await tool.call(parsed.data, {
-                                    sandboxPath: '',
+                                    sandboxPath: this.sandboxPath,
                                     backupStore: {
                                         save: async () => { },
                                         restore: async () => null,

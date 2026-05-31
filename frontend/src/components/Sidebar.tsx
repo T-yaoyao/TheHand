@@ -7,10 +7,12 @@ interface SidebarProps {
   selectedId: string | null
   newInput: string
   loading: boolean
+  isOpen: boolean
   onNewInputChange: (v: string) => void
   onCreate: () => void
   onSelect: (req: Requirement) => void
   onRefresh: () => void
+  onToggle: () => void
   searchQuery: string
   onSearchChange: (v: string) => void
 }
@@ -20,15 +22,17 @@ export function Sidebar({
   selectedId,
   newInput,
   loading,
+  isOpen,
   onNewInputChange,
   onCreate,
   onSelect,
   onRefresh,
+  onToggle,
   searchQuery,
   onSearchChange,
 }: SidebarProps) {
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar${isOpen ? ' open' : ''}`}>
       <div className="sidebar-header">
         <div className="logo">
           <span className="logo-icon">✋</span>
@@ -37,9 +41,14 @@ export function Sidebar({
             <p>PM 需求交付</p>
           </div>
         </div>
-        <button type="button" className="btn-ghost btn-icon" onClick={onRefresh} title="刷新列表">
-          ↻
-        </button>
+        <div className="sidebar-header-actions">
+          <button type="button" className="btn-ghost btn-icon" onClick={onRefresh} title="刷新列表">
+            ↻
+          </button>
+          <button type="button" className="btn-ghost btn-icon sidebar-close" onClick={onToggle} title="关闭侧边栏">
+            ✕
+          </button>
+        </div>
       </div>
 
       <div className="sidebar-compose">

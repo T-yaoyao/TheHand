@@ -213,9 +213,15 @@ ${prompt}
    */
   private buildCanHandle(expression: string | undefined): (req: StructuredRequirement) => boolean {
     if (!expression) return () => false
-    const match = expression.match(/requirement\.type\s*===\s*['"](\w+)['"]/)
+    const match = expression.match(/(?:requirement|req)\.type\s*={2,3}\s*['"](\w+)['"]/)
     if (match) {
       return (req) => req.type === match[1]
+    }
+    const typeNames = ['add_field', 'add_page', 'modify_api', 'delete_field', 'delete_page']
+    for (const name of typeNames) {
+      if (expression.includes(name)) {
+        return (req) => req.type === name
+      }
     }
     return () => false
   }

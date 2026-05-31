@@ -30,6 +30,7 @@ export function App() {
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null)
   const [thinking, setThinking] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
   const selectedRef = useRef<Requirement | null>(null)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout>>()
@@ -227,15 +228,22 @@ export function App() {
         selectedId={selected?.id ?? null}
         newInput={newInput}
         loading={creating}
+        isOpen={sidebarOpen}
         onNewInputChange={setNewInput}
         onCreate={handleCreate}
-        onSelect={setSelected}
+        onSelect={(req) => { setSelected(req); setSidebarOpen(false) }}
         onRefresh={refreshList}
+        onToggle={() => setSidebarOpen(false)}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
       />
 
+      {sidebarOpen && <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />}
+
       <main className="main">
+        <button type="button" className="btn-ghost btn-icon sidebar-toggle" onClick={() => setSidebarOpen(true)} title="打开侧边栏">
+          ☰
+        </button>
         {errorBanner && (
           <div className="error-banner">
             {errorBanner}

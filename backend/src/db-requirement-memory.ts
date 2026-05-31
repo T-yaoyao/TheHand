@@ -1,5 +1,5 @@
 import type { Requirement, Conversation, Lesson, ChangeRecord, MemoryContext, ProjectContext } from '@thehand/core'
-import { queryAll, queryOne, execute } from './db.js'
+import { queryAll, queryOne, execute, executeBatch } from './db.js'
 import { randomUUID } from 'crypto'
 
 function rowToRequirement(row: Record<string, unknown>): Requirement {
@@ -133,12 +133,12 @@ export class DbRequirementMemory {
   }
 
   async saveChanges(requirementId: string, files: { path: string; action: 'created' | 'modified' | 'deleted' }[]): Promise<void> {
-    for (const file of files) {
-      execute(
-        `INSERT INTO change_history (id, requirement_id, file_path, action) VALUES (?, ?, ?, ?)`,
-        [randomUUID(), requirementId, file.path, file.action],
-      )
-    }
+    executeBatch(
+      files.map(file => ({
+        sql: `INSERT INTO change_history (id, requirement_id, file_path, action) VALUES (?, ?, ?, ?)`,
+        params: [randomUUID(), requirementId, file.path, file.action],
+      })),
+    )
   }
 
   async getChanges(requirementId: string): Promise<ChangeRecord[]> {

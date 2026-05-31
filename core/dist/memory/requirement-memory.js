@@ -66,5 +66,12 @@ export class RequirementMemory {
             this.conversations.set(requirementId, conversations.slice(-10));
         }
     }
+    async saveChanges(_requirementId, _files) {
+        // no-op for in-memory implementation; DB-backed version overrides this
+    }
+    async findChangesByEntity(_keyword) {
+        // no-op for in-memory implementation; DB-backed version overrides this
+        return [];
+    }
 }
 //# sourceMappingURL=requirement-memory.js.map

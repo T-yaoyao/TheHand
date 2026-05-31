@@ -99,7 +99,7 @@ async function main() {
   ]
 
   // 创建 Agent Runner
-  const agentRunner = new AgentRunner(llmClient, tools)
+  const agentRunner = new AgentRunner(llmClient, tools, sandboxPath)
 
   // 创建 Skill Registry
   const skillRegistry = new SkillRegistry()

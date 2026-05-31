@@ -7,7 +7,8 @@ import type { LLMClient } from '../llm/llm-client.js';
 export declare class AgentRunner {
     private llmClient;
     private toolPool;
-    constructor(llmClient: LLMClient, toolPool: Tool[]);
+    private sandboxPath;
+    constructor(llmClient: LLMClient, toolPool: Tool[], sandboxPath?: string);
     /**
      * 执行指定 Agent：循环调用 LLM → 提取 tool_use → 执行工具 → 循环
      *

@@ -2,6 +2,7 @@ import type {
   Requirement,
   Conversation,
   Lesson,
+  ChangeRecord,
   MemoryContext,
   ProjectContext,
 } from '../types.js'
@@ -83,5 +84,14 @@ export class RequirementMemory {
     if (conversations.length > 10) {
       this.conversations.set(requirementId, conversations.slice(-10))
     }
+  }
+
+  async saveChanges(_requirementId: string, _files: { path: string; action: 'created' | 'modified' | 'deleted' }[]): Promise<void> {
+    // no-op for in-memory implementation; DB-backed version overrides this
+  }
+
+  async findChangesByEntity(_keyword: string): Promise<{ requirementId: string; files: ChangeRecord[] }[]> {
+    // no-op for in-memory implementation; DB-backed version overrides this
+    return []
   }
 }

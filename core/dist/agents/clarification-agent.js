@@ -62,7 +62,7 @@ function parseClarificationResponse(response, round) {
     }
     catch {
         // 尝试从文本中提取 JSON
-        const match = response.match(/\{[\s\S]*\}/);
+        const match = response.match(/\{[\s\S]*?\}/);
         if (match) {
             try {
                 json = JSON.parse(match[0]);
@@ -117,11 +117,19 @@ function extractQuestions(text) {
  * 默认/降级的结构化需求
  */
 function currentOrDefault(text) {
+    let type = 'unknown';
+    if (/删除|remove|delete/i.test(text))
+        type = 'delete_field';
+    else if (/加|新增|添加|add/i.test(text))
+        type = 'add_field';
+    else if (/改|修改|update|modify/i.test(text))
+        type = 'modify_api';
     return {
-        type: 'unknown',
+        type,
         entity: 'unknown',
         scope: 'fullstack',
         description: text.slice(0, 200),
+        isDefaulted: true,
     };
 }
 //# sourceMappingURL=clarification-agent.js.map
