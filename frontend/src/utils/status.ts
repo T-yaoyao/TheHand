@@ -9,6 +9,7 @@ export const STATUS_LABELS: Record<string, string> = {
   testing: '测试中',
   done: '已完成',
   failed: '失败',
+  reverted: '已撤回',
 }
 
 export const STATUS_COLORS: Record<string, string> = {
@@ -22,6 +23,7 @@ export const STATUS_COLORS: Record<string, string> = {
   testing: '#f5a524',
   done: '#3dd68c',
   failed: '#f2555a',
+  reverted: '#9ca3af',
 }
 
 export function statusLabel(status: string): string {
