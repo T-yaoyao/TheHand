@@ -147,16 +147,25 @@ export class DbRequirementMemory {
     }))
   }
 
-  async findChangesByEntity(entity: string): Promise<{ requirementId: string; files: ChangeRecord[] }[]> {
-    // 通过原始需求描述（pm_input）匹配，找到创建该实体时涉及的所有文件
-    const rows = queryAll(
-      `SELECT ch.* FROM change_history ch
-       JOIN requirements r ON ch.requirement_id = r.id
+  async findChangesByEntity(keyword: string): Promise<{ requirementId: string; files: ChangeRecord[] }[]> {
+    // 第一步：通过关键词找到相关的需求 ID（搜索需求描述）
+    const matchedReqIds = queryAll(
+      `SELECT DISTINCT r.id FROM requirements r
        WHERE r.pm_input LIKE '%' || ? || '%'
-       ORDER BY ch.created_at DESC
-       LIMIT 50`,
-      [entity],
+       ORDER BY r.created_at DESC
+       LIMIT 10`,
+      [keyword],
+    ).map((r: Record<string, unknown>) => r.id as string)
+
+    if (matchedReqIds.length === 0) return []
+
+    // 第二步：用需求 ID 获取这些需求的所有变更文件（ID 追溯，不依赖路径匹配）
+    const placeholders = matchedReqIds.map(() => '?').join(',')
+    const rows = queryAll(
+      `SELECT * FROM change_history WHERE requirement_id IN (${placeholders}) ORDER BY created_at ASC`,
+      matchedReqIds,
     )
+
     const grouped = new Map<string, ChangeRecord[]>()
     for (const row of rows) {
       const reqId = row.requirement_id as string
