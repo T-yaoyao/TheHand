@@ -98,6 +98,12 @@ export class DockerSandboxManager {
     return sandbox
   }
 
+  /** 获取已存在的沙箱（用于 resume 场景，如 diff-ready → commit） */
+  getExisting(sandboxId: string): Sandbox | null {
+    const entry = this.activeSandboxes.get(sandboxId)
+    return entry?.sandbox ?? null
+  }
+
   /** 获取容器内执行的 CommandExecutor（供 TestRunner / RepoManager 使用） */
   getExecutor(sandbox: Sandbox): CommandExecutor {
     const entry = this.findEntry(sandbox)

@@ -26,6 +26,7 @@ import { ProjectMemory } from '../memory/project-memory.js'
 
 export interface SandboxManagerLike {
   create(id?: string): Promise<Sandbox>
+  getExisting?(sandboxId: string): Sandbox | null
   applyToSource(sandbox: Sandbox, files: string[], commitMessage?: string): Promise<void>
   cleanupAll(): Promise<void>
   getActiveCount(): number
@@ -46,6 +47,8 @@ export interface OrchestratorDeps {
  * 支持多阶段暂停：plan-ready → 用户审批 → coding → diff-ready → 用户确认 → commit
  */
 export class Orchestrator {
+  private sandboxShouldCleanup = true
+
   constructor(private deps: OrchestratorDeps) {}
 
   /**
@@ -59,11 +62,19 @@ export class Orchestrator {
    */
   async *run(requirement: Requirement, projectId: string = 'conduit'): AsyncGenerator<OrchestratorEvent> {
     const { agentRunner, llmClient, promptManager, skillRegistry, sandboxManager, projectMemory, requirementMemory } = this.deps
+    this.sandboxShouldCleanup = true
 
-    // 1. 创建沙箱
-    yield { type: 'executing', phase: 'sandbox-create', progress: 0 }
-    const sandbox = await sandboxManager.create(requirement.id)
-    yield { type: 'executing', phase: 'sandbox-ready', progress: 5 }
+    // 1. 创建沙箱（resume 时复用已有沙箱）
+    let sandbox: Sandbox
+    const existingSandbox = sandboxManager.getExisting?.(requirement.id)
+    if (existingSandbox && requirement.status === 'diff-ready') {
+      sandbox = existingSandbox
+      yield { type: 'executing', phase: 'sandbox-reused', progress: 5 }
+    } else {
+      yield { type: 'executing', phase: 'sandbox-create', progress: 0 }
+      sandbox = await sandboxManager.create(requirement.id)
+      yield { type: 'executing', phase: 'sandbox-ready', progress: 5 }
+    }
 
     // 初始化执行器（Docker 沙箱时命令在容器内执行）
     const executor: CommandExecutor | undefined =
@@ -137,6 +148,7 @@ export class Orchestrator {
         requirement.structuredRequirement = clarificationResult.requirement
         await requirementMemory.saveRequirement(requirement)
 
+        this.sandboxShouldCleanup = false  // 暂停点，保留沙箱供后续 resume
         yield {
           type: 'waiting-for-pm',
           requirement: { ...requirement, status: 'clarifying' },
@@ -234,6 +246,7 @@ export class Orchestrator {
       requirement.plan = plan
       requirement.status = 'plan-approved'
       await requirementMemory.saveRequirement(requirement)
+      this.sandboxShouldCleanup = false  // 暂停点，保留沙箱供后续 resume
       yield { type: 'plan-ready', plan, requirement }
       return
 
@@ -244,7 +257,9 @@ export class Orchestrator {
         await requirementMemory.saveRequirement(requirement)
       }
     } finally {
-      try { await sandbox.cleanup() } catch {}
+      if (this.sandboxShouldCleanup) {
+        try { await sandbox.cleanup() } catch {}
+      }
     }
   }
 
@@ -447,6 +462,7 @@ export class Orchestrator {
 
     requirement.status = 'diff-ready'
     await requirementMemory.saveRequirement(requirement)
+    this.sandboxShouldCleanup = false  // 暂停点，保留沙箱供后续 commit
     yield {
       type: 'diff-ready',
       requirement,

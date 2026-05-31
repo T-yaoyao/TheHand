@@ -23,6 +23,8 @@ export declare class DockerSandboxManager {
     private imageBuilt;
     constructor(sourcePath: string, config?: DockerSandboxConfig);
     create(id?: string): Promise<Sandbox>;
+    /** 获取已存在的沙箱（用于 resume 场景，如 diff-ready → commit） */
+    getExisting(sandboxId: string): Sandbox | null;
     /** 获取容器内执行的 CommandExecutor（供 TestRunner / RepoManager 使用） */
     getExecutor(sandbox: Sandbox): CommandExecutor;
     applyToSource(sandbox: Sandbox, files: string[], commitMessage?: string): Promise<void>;
