@@ -160,7 +160,14 @@ requirementsRouter.get('/:id/conversations', (req: Request, res: Response) => {
  * DELETE /api/requirements/:id — 删除需求
  */
 requirementsRouter.delete('/:id', (req: Request, res: Response) => {
-  const id = req.params.id
+  const id = req.params.id as string
+
+  // 正在运行的需求不能删除，否则 orchestrator 会把数据写回来
+  if (isOrchestratorRunning(id)) {
+    res.status(409).json({ error: '需求正在运行中，请等待完成或先停止流水线后再删除' })
+    return
+  }
+
   try {
     executeBatch([
       { sql: 'DELETE FROM conversations WHERE requirement_id = ?', params: [id] },
