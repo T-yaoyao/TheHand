@@ -132,14 +132,16 @@ export class Orchestrator {
           })
         }
 
+        // 必须在 yield 之前保存到 DB，因为 for-await break 会触发 generator.return() 跳过 yield 之后的代码
+        requirement.status = 'clarifying'
+        requirement.structuredRequirement = clarificationResult.requirement
+        await requirementMemory.saveRequirement(requirement)
+
         yield {
           type: 'waiting-for-pm',
           requirement: { ...requirement, status: 'clarifying' },
           questions,
         }
-        requirement.status = 'clarifying'
-        requirement.structuredRequirement = clarificationResult.requirement
-        await requirementMemory.saveRequirement(requirement)
         return
       }
 
