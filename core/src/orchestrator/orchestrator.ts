@@ -336,6 +336,11 @@ export class Orchestrator {
           .join('\n---\n')
         codeErrors.push(`第${codeAttempt}轮测试失败:\n${testErrors}`)
 
+        // 恢复沙箱原始文件（避免坏文件污染下一轮编码）
+        if (executor) {
+          await executor('git checkout . && git clean -fd', { timeout: 30_000 }).catch(() => {})
+        }
+
         yield { type: 'executing', phase: `test failed (attempt ${codeAttempt}/${MAX_RETRIES}), retrying coding...`, progress: 65 }
 
         if (codeAttempt === MAX_RETRIES) {
