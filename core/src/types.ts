@@ -9,6 +9,7 @@ export type RequirementStatus =
   | 'clarifying'
   | 'clarified'
   | 'planning'
+  | 'plan-ready'
   | 'plan-approved'
   | 'plan-rejected'
   | 'coding'

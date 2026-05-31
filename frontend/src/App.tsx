@@ -140,25 +140,13 @@ export function App() {
     }
   }
 
-  const handleRun = async () => {
-    if (!selected) return
-    if (selected.status === 'done' || selected.status === 'failed') {
-      setConfirmDialog({
-        message: `当前需求状态为"${selected.status === 'done' ? '已完成' : '已失败'}"，确定要重新运行？`,
-        onConfirm: () => doRun(),
-      })
-      return
-    }
-    doRun()
-  }
-
-  const doRun = async () => {
+  const doRun = async (id: string) => {
     setConfirmDialog(null)
     setRunning(true)
     clearEvents()
     try {
       setTab('progress')
-      await api.runOrchestrator(selected!.id)
+      await api.runOrchestrator(id)
       showToast('success', '流水线已启动')
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : '触发失败')
@@ -167,16 +155,31 @@ export function App() {
     }
   }
 
+  const handleRun = async () => {
+    if (!selected) return
+    const id = selected.id
+    if (selected.status === 'done' || selected.status === 'failed') {
+      setConfirmDialog({
+        message: `当前需求状态为"${selected.status === 'done' ? '已完成' : '已失败'}"，确定要重新运行？`,
+        onConfirm: () => doRun(id),
+      })
+      return
+    }
+    doRun(id)
+  }
+
   const handleDelete = async () => {
     if (!selected) return
+    const id = selected.id
+    const title = selected.pm_input.slice(0, 30)
     setConfirmDialog({
-      message: `确定删除需求"${selected.pm_input.slice(0, 30)}…"？`,
+      message: `确定删除需求"${title}"…？`,
       onConfirm: async () => {
         setConfirmDialog(null)
         setDeleting(true)
         try {
-          await api.deleteRequirement(selected.id)
-          setRequirements((prev) => prev.filter((r) => r.id !== selected.id))
+          await api.deleteRequirement(id)
+          setRequirements((prev) => prev.filter((r) => r.id !== id))
           setSelected(null)
           showToast('success', '已删除')
         } catch (e: unknown) {
@@ -190,13 +193,14 @@ export function App() {
 
   const handleRevert = async () => {
     if (!selected) return
+    const id = selected.id
     setConfirmDialog({
       message: '确定撤回该需求的代码变更？将执行 git revert 回退代码。',
       onConfirm: async () => {
         setConfirmDialog(null)
         setReverting(true)
         try {
-          const result = await api.revertRequirement(selected.id)
+          const result = await api.revertRequirement(id)
           showToast('success', `已撤回 commit ${result.revertedCommit}`)
           refreshList()
         } catch (e: unknown) {
@@ -392,7 +396,7 @@ export function App() {
               {tab === 'plan' && (
                 <div>
                   <PlanView plan={(livePlan as FilePlan[] | undefined) ?? plan} />
-                  {(selected.status === 'plan-approved' || latestEvent?.type === 'plan-ready') && (
+                  {(selected.status === 'plan-ready' || latestEvent?.type === 'plan-ready') && (
                     <div className="plan-actions">
                       <button type="button" className="btn-primary" onClick={async () => {
                         try {

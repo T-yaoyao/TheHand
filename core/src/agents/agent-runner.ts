@@ -205,6 +205,11 @@ export class AgentRunner {
 
     const def = schema._def
 
+    // 解包 Optional/Nullable 包装器
+    if (def.typeName === 'ZodOptional' || def.typeName === 'ZodNullable') {
+      return this.zodToJsonSchema(def.innerType)
+    }
+
     if (def.typeName === 'ZodObject') {
       const properties: any = {}
       const required: string[] = []

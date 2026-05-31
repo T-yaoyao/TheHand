@@ -3,6 +3,7 @@ export const STATUS_LABELS: Record<string, string> = {
   clarifying: '澄清中',
   clarified: '已澄清',
   planning: '方案中',
+  'plan-ready': '方案就绪',
   'plan-approved': '方案就绪',
   'plan-rejected': '方案驳回',
   coding: '编码中',
@@ -11,6 +12,7 @@ export const STATUS_LABELS: Record<string, string> = {
   done: '已完成',
   failed: '失败',
   reverted: '已撤回',
+  'waiting-for-pm': '等待回复',
 }
 
 export const STATUS_COLORS: Record<string, string> = {
@@ -18,6 +20,7 @@ export const STATUS_COLORS: Record<string, string> = {
   clarifying: '#5b8def',
   clarified: '#3dd68c',
   planning: '#5b8def',
+  'plan-ready': '#3dd68c',
   'plan-approved': '#3dd68c',
   'plan-rejected': '#f5a524',
   'diff-ready': '#8b5cf6',
@@ -26,6 +29,7 @@ export const STATUS_COLORS: Record<string, string> = {
   done: '#3dd68c',
   failed: '#f2555a',
   reverted: '#9ca3af',
+  'waiting-for-pm': '#5b8def',
 }
 
 export function statusLabel(status: string): string {

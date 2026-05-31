@@ -52,7 +52,7 @@ export class Orchestrator {
                 yield* this.phaseCommit(requirement, requirementMemory, repoManager, sandboxManager, sandbox);
                 return;
             }
-            if (requirement.status === 'plan-approved' && requirement.plan) {
+            if (requirement.status === 'plan-ready' && requirement.plan) {
                 // 跳转到编码阶段（用户已确认方案）
                 yield* this.phaseCoding(requirement, projectId, requirementMemory, skillRegistry, llmClient, promptManager, projectContext, testRunner, repoManager, sandboxManager, sandbox, executor);
                 return;
@@ -171,7 +171,7 @@ export class Orchestrator {
             }
             // 方案就绪 → 暂停，等用户审批
             requirement.plan = plan;
-            requirement.status = 'plan-approved';
+            requirement.status = 'plan-ready';
             await requirementMemory.saveRequirement(requirement);
             this.sandboxShouldCleanup = false; // 暂停点，保留沙箱供后续 resume
             yield { type: 'plan-ready', plan, requirement };

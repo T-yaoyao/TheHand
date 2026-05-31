@@ -1,5 +1,5 @@
 import { readFile } from 'fs/promises';
-import { join } from 'path';
+import { resolve } from 'path';
 /**
  * 编码 Agent 定义（供 AgentRunner 等场景使用）
  */
@@ -30,9 +30,14 @@ export async function runCoding(llmClient, promptManager, plan, sandboxPath, pro
         constraintsHint += lessonsHint;
     }
     for (const file of plan) {
+        // 路径穿越检查
+        const fullPath = resolve(sandboxPath, file.path);
+        if (!fullPath.startsWith(resolve(sandboxPath))) {
+            continue; // 跳过越界路径
+        }
         let originalContent = '';
         try {
-            originalContent = await readFile(join(sandboxPath, file.path), 'utf-8');
+            originalContent = await readFile(fullPath, 'utf-8');
         }
         catch {
             // 新文件，无原始内容

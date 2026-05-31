@@ -13,7 +13,7 @@ const sourceRepo = resolve(process.cwd(), '..', 'sandbox-repo', 'conduit-realwor
 
 export const requirementsRouter = Router()
 
-const VALID_STATUSES = ['idle', 'clarifying', 'clarified', 'waiting-for-pm', 'planning', 'plan-approved', 'plan-rejected', 'coding', 'testing', 'diff-ready', 'done', 'failed', 'reverted']
+const VALID_STATUSES = ['idle', 'clarifying', 'clarified', 'waiting-for-pm', 'planning', 'plan-ready', 'plan-approved', 'plan-rejected', 'coding', 'testing', 'diff-ready', 'done', 'failed', 'reverted']
 
 /**
  * POST /api/requirements — 创建需求
@@ -202,19 +202,10 @@ requirementsRouter.post('/:id/revert', async (req: Request, res: Response) => {
   try {
     // 通过 commit message 中的 [req:ID] 标记查找对应 commit
     const reqMarker = `[req:${id.slice(0, 8)}]`
-    let { stdout: logOutput } = await execAsync(
-      `git log --oneline --all -20 --fixed-strings --grep="${reqMarker}"`,
+    const { stdout: logOutput } = await execAsync(
+      `git log --oneline -20 --fixed-strings --grep="${reqMarker}"`,
       { cwd: sourceRepo },
     )
-
-    // Fallback: 如果找不到标记，取最近一个提交
-    if (!logOutput.trim()) {
-      const fallback = await execAsync(
-        `git log --oneline -1`,
-        { cwd: sourceRepo },
-      )
-      logOutput = fallback.stdout
-    }
 
     const commits = logOutput.trim().split('\n').filter(Boolean)
     if (commits.length === 0) {
@@ -248,7 +239,7 @@ requirementsRouter.post('/:id/approve-plan', async (req: Request, res: Response)
     res.status(404).json({ error: '需求不存在' })
     return
   }
-  if (requirement.status !== 'plan-approved') {
+  if (requirement.status !== 'plan-ready') {
     res.status(400).json({ error: `当前状态 ${requirement.status} 不可确认方案` })
     return
   }
@@ -262,6 +253,8 @@ requirementsRouter.post('/:id/approve-plan', async (req: Request, res: Response)
       return
     }
     log.error('[api] 确认方案触发失败:', e.message)
+    res.status(500).json({ error: `触发失败: ${e.message}` })
+    return
   }
 
   res.json({ ok: true })
@@ -279,7 +272,7 @@ requirementsRouter.post('/:id/reject-plan', (req: Request, res: Response) => {
     res.status(404).json({ error: '需求不存在' })
     return
   }
-  if (requirement.status !== 'plan-approved') {
+  if (requirement.status !== 'plan-ready') {
     res.status(400).json({ error: `当前状态 ${requirement.status} 不可驳回` })
     return
   }
@@ -322,6 +315,8 @@ requirementsRouter.post('/:id/commit', async (req: Request, res: Response) => {
       return
     }
     log.error('[api] 确认提交触发失败:', e.message)
+    res.status(500).json({ error: `触发失败: ${e.message}` })
+    return
   }
 
   res.json({ ok: true })

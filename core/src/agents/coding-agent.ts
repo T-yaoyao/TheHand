@@ -1,5 +1,5 @@
 import { readFile } from 'fs/promises'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import type { FilePlan, ProjectContext } from '../types.js'
 import type { LLMClient } from '../llm/llm-client.js'
 import type { PromptManager } from '../llm/prompt-manager.js'
@@ -50,9 +50,15 @@ export async function runCoding(
   }
 
   for (const file of plan) {
+    // 路径穿越检查
+    const fullPath = resolve(sandboxPath, file.path)
+    if (!fullPath.startsWith(resolve(sandboxPath))) {
+      continue  // 跳过越界路径
+    }
+
     let originalContent = ''
     try {
-      originalContent = await readFile(join(sandboxPath, file.path), 'utf-8')
+      originalContent = await readFile(fullPath, 'utf-8')
     } catch {
       // 新文件，无原始内容
     }
