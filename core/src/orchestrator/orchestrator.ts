@@ -84,6 +84,17 @@ export class Orchestrator {
     const testRunner = new TestRunner(sandbox.path, executor)
     const repoManager = new RepoManager(sandbox.path, executor)
 
+    // 确保依赖已安装（复用沙箱时可能缺失）
+    if (executor && existingSandbox) {
+      try {
+        const check = await executor('test -f node_modules/.bin/vite && echo ok || echo missing', { timeout: 5_000 })
+        if (check.stdout.trim() === 'missing') {
+          yield { type: 'executing', phase: 'installing dependencies', progress: 8 }
+          await executor('npm install', { timeout: 180_000 })
+        }
+      } catch {}
+    }
+
     // 加载项目上下文
     const projectContext = await projectMemory.load(projectId)
 
