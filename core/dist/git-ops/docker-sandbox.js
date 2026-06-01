@@ -174,11 +174,11 @@ export class DockerSandboxManager {
         catch {
             // Ignore immediate errors from background process
         }
-        // Poll until the server responds or timeout
+        // Poll until the server responds or timeout (use node since curl may not be available)
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
             try {
-                const result = await this.dockerExec(entry.containerName, `curl -s -o /dev/null -w '%{http_code}' http://localhost:${port}`, 5_000);
+                const result = await this.dockerExec(entry.containerName, `node -e "const http=require('http');const req=http.get('http://localhost:${port}',r=>{console.log(r.statusCode);process.exit(0)});req.on('error',()=>process.exit(1));req.setTimeout(2000,()=>process.exit(1))"`, 5_000);
                 if (result.exitCode === 0 && result.stdout.trim().match(/^[23]/)) {
                     return true;
                 }
