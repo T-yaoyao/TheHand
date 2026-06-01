@@ -111,13 +111,21 @@ function parseCodingBatchResponse(response: string, plan: FilePlan[]): CodeFileO
   const results: CodeFileOutput[] = []
 
   // 优先从 markdown 代码块中提取（LLM 最常见的输出格式）
-  const codeBlockMatch = response.match(/```(?:json)?\s*\n([\s\S]*?)```/)
-  if (codeBlockMatch) {
-    try {
-      const parsed = JSON.parse(codeBlockMatch[1].trim())
-      extractFiles(parsed, results)
-      if (results.length > 0) return results
-    } catch {}
+  // 用贪婪匹配：从第一个 ```json 后的 [ 到最后一个 ``` 前的 ]
+  const codeBlockStart = response.indexOf('```json')
+  const codeBlockStartAlt = response.indexOf('```')
+  const startIdx = codeBlockStart >= 0 ? codeBlockStart : codeBlockStartAlt
+  if (startIdx >= 0) {
+    const contentStart = response.indexOf('\n', startIdx) + 1
+    const lastBackticks = response.lastIndexOf('```')
+    if (lastBackticks > contentStart) {
+      const codeContent = response.slice(contentStart, lastBackticks).trim()
+      try {
+        const parsed = JSON.parse(codeContent)
+        extractFiles(parsed, results)
+        if (results.length > 0) return results
+      } catch {}
+    }
   }
 
   // 尝试直接解析整个响应为 JSON
