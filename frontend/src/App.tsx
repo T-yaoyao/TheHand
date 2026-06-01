@@ -29,6 +29,8 @@ export function App() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null)
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null)
   const [thinking, setThinking] = useState(false)
+  /** 长时间 API（确认方案 / 确认提交）进行中，用于全局提示，避免用户以为无响应 */
+  const [pipelineBusy, setPipelineBusy] = useState<'approve-plan' | 'commit' | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
@@ -77,6 +79,7 @@ export function App() {
       api.getConversations(selected.id).then(setConversations).catch(() => setConversations([]))
       clearEvents()
       setTab('chat')
+      setPipelineBusy(null)
     }
   }, [selected?.id, clearEvents])
 
@@ -355,6 +358,24 @@ export function App() {
               </div>
             )}
 
+            {pipelineBusy && (
+              <div className="pipeline-busy-banner" role="status" aria-live="assertive" aria-busy="true">
+                <span className="pipeline-busy-spinner" aria-hidden />
+                <div className="pipeline-busy-text">
+                  <strong>
+                    {pipelineBusy === 'approve-plan'
+                      ? '正在执行方案'
+                      : '正在提交变更'}
+                  </strong>
+                  <span>
+                    {pipelineBusy === 'approve-plan'
+                      ? '已切换到「进度」：沙箱、编码与测试中，通常需数十秒至数分钟。请勿重复点击或关闭页面。'
+                      : '正在将沙箱中的提交应用到源仓库，请稍候…'}
+                  </span>
+                </div>
+              </div>
+            )}
+
             <div className="tab-panel">
               {tab === 'progress' && (
                 <StatusFlow
@@ -406,19 +427,32 @@ export function App() {
                   <PlanView plan={(livePlan as FilePlan[] | undefined) ?? plan} />
                   {(selected.status === 'plan-ready' || latestEvent?.type === 'plan-ready') && (
                     <div className="plan-actions">
-                      <button type="button" className="btn-primary" onClick={async () => {
-                        try {
-                          await api.approvePlan(selected.id)
-                          showToast('success', '方案已确认，开始编码')
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={!!pipelineBusy}
+                        onClick={async () => {
+                          setTab('progress')
+                          setPipelineBusy('approve-plan')
                           setThinking(true)
-                          refreshList()
-                        } catch (e: unknown) {
-                          showToast('error', e instanceof Error ? e.message : '确认失败')
-                        }
-                      }}>
-                        确认方案
+                          await new Promise<void>((r) => {
+                            requestAnimationFrame(() => requestAnimationFrame(() => r()))
+                          })
+                          try {
+                            await api.approvePlan(selected.id)
+                            showToast('success', '方案已确认，编码阶段已完成')
+                            refreshList()
+                          } catch (e: unknown) {
+                            showToast('error', e instanceof Error ? e.message : '确认失败')
+                            setThinking(false)
+                          } finally {
+                            setPipelineBusy(null)
+                          }
+                        }}
+                      >
+                        {pipelineBusy === 'approve-plan' ? '执行中…' : '确认方案'}
                       </button>
-                      <button type="button" className="btn-secondary" onClick={async () => {
+                      <button type="button" className="btn-secondary" disabled={!!pipelineBusy} onClick={async () => {
                         try {
                           await api.rejectPlan(selected.id)
                           showToast('success', '方案已驳回，请修改需求后重新运行')
@@ -457,19 +491,32 @@ export function App() {
                         <pre className="diff-content"><code>{latestEvent.diff}</code></pre>
                       )}
                       <div className="plan-actions">
-                        <button type="button" className="btn-primary" onClick={async () => {
-                          try {
-                            await api.commitChanges(selected.id)
-                            showToast('success', '代码已提交，正在应用到源仓库')
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          disabled={!!pipelineBusy}
+                          onClick={async () => {
+                            setTab('progress')
+                            setPipelineBusy('commit')
                             setThinking(true)
-                            refreshList()
-                          } catch (e: unknown) {
-                            showToast('error', e instanceof Error ? e.message : '提交失败')
-                          }
-                        }}>
-                          确认提交
+                            await new Promise<void>((r) => {
+                              requestAnimationFrame(() => requestAnimationFrame(() => r()))
+                            })
+                            try {
+                              await api.commitChanges(selected.id)
+                              showToast('success', '已应用到源仓库')
+                              refreshList()
+                            } catch (e: unknown) {
+                              showToast('error', e instanceof Error ? e.message : '提交失败')
+                              setThinking(false)
+                            } finally {
+                              setPipelineBusy(null)
+                            }
+                          }}
+                        >
+                          {pipelineBusy === 'commit' ? '提交中…' : '确认提交'}
                         </button>
-                        <button type="button" className="btn-secondary" onClick={async () => {
+                        <button type="button" className="btn-secondary" disabled={!!pipelineBusy} onClick={async () => {
                           try {
                             await api.rollbackChanges(selected.id)
                             showToast('success', '已撤回变更')

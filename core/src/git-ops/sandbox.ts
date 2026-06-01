@@ -1,4 +1,4 @@
-import { exec } from 'child_process'
+import { exec, execFileSync } from 'child_process'
 import { promisify } from 'util'
 import { mkdtemp, rm, cp, mkdir, readdir, stat, copyFile, readlink, symlink } from 'fs/promises'
 import { join, relative, dirname } from 'path'
@@ -182,13 +182,16 @@ export class SandboxManager {
     // 2. 在源仓库中提交
     if (commitMessage) {
       try {
-        await execAsync('git add -A', { cwd: this.sourcePath })
-        await execAsync(`git commit -m "${commitMessage.replace(/"/g, '\\"')}"`, { cwd: this.sourcePath })
+        execFileSync('git', ['add', '-A'], { cwd: this.sourcePath, timeout: 30_000 })
+        execFileSync('git', ['commit', '-m', commitMessage], { cwd: this.sourcePath, timeout: 30_000 })
       } catch (e: any) {
-        // 如果没有变更（nothing to commit），忽略错误
-        if (!e.message?.includes('nothing to commit')) {
-          throw e
+        const stderr = e.stderr?.toString?.() ?? ''
+        const msg = e.message?.toString?.() ?? ''
+        // 源仓库已与沙箱一致时会出现 nothing to commit；execFileSync 常在 stderr 而非 message
+        if (msg.includes('nothing to commit') || stderr.includes('nothing to commit')) {
+          return
         }
+        throw e
       }
     }
   }

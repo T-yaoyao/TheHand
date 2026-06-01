@@ -114,6 +114,14 @@ export class RepoManager {
         return { hash: stdout.trim(), message };
     }
     /**
+     * 最近一次提交涉及的文件路径（用于 commit 后同步到源仓库）。
+     * 注意：commit 后 git diff 为空，不能再用 getChangedFiles()。
+     */
+    async getFilesInLastCommit() {
+        const { stdout } = await this.executor('git diff-tree --no-commit-id --name-only -r HEAD');
+        return stdout.trim().split('\n').filter(Boolean);
+    }
+    /**
      * 推送分支到远程
      */
     async push(branch) {

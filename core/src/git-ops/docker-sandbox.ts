@@ -180,8 +180,18 @@ export class DockerSandboxManager {
         execFileSync('git', ['commit', '-m', commitMessage], { cwd: this.sourcePath, timeout: 30_000 })
         console.log('[applyToSource] git commit done')
       } catch (e: any) {
+<<<<<<< Updated upstream
         console.log(`[applyToSource] git error: ${e.message}`)
         if (!e.message?.includes('nothing to commit')) throw e
+=======
+        const stderr = e.stderr?.toString() ?? ''
+        const stdout = e.stdout?.toString() ?? ''
+        // nothing to commit 是正常情况，忽略
+        if (e.message?.includes('nothing to commit') || stderr.includes('nothing to commit')) return
+        // 附加 stderr/stdout 信息方便排查
+        const detail = [e.message, stderr, stdout].filter(Boolean).join('\n')
+        throw new Error(`git commit failed: ${detail}`)
+>>>>>>> Stashed changes
       }
     }
   }

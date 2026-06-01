@@ -52,6 +52,11 @@ export declare class RepoManager {
      */
     commit(message: string): Promise<CommitResult>;
     /**
+     * 最近一次提交涉及的文件路径（用于 commit 后同步到源仓库）。
+     * 注意：commit 后 git diff 为空，不能再用 getChangedFiles()。
+     */
+    getFilesInLastCommit(): Promise<string[]>;
+    /**
      * 推送分支到远程
      */
     push(branch?: string): Promise<string>;

@@ -909,6 +909,52 @@
   border-top: 1px solid var(--border);
 }
 
+/* Long-running pipeline (approve plan / commit) */
+.pipeline-busy-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin: 0 24px 12px;
+  padding: 14px 18px;
+  background: linear-gradient(135deg, rgba(91, 141, 239, 0.18), rgba(167, 139, 250, 0.12));
+  border: 1px solid rgba(91, 141, 239, 0.45);
+  border-radius: var(--radius);
+  animation: pipeline-busy-pulse 2.2s ease-in-out infinite;
+}
+.pipeline-busy-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.pipeline-busy-text strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+.pipeline-busy-text span {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.pipeline-busy-spinner {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin-top: 2px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: pipeline-spin 0.75s linear infinite;
+}
+@keyframes pipeline-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes pipeline-busy-pulse {
+  0%, 100% { border-color: rgba(91, 141, 239, 0.35); }
+  50% { border-color: rgba(91, 141, 239, 0.65); }
+}
+
 /* Plan actions */
 .plan-actions {
   display: flex;
