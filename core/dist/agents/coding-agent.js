@@ -1,5 +1,5 @@
-import { readFile } from 'fs/promises';
-import { resolve } from 'path';
+import { readFile, readdir } from 'fs/promises';
+import { join, resolve } from 'path';
 /**
  * 编码 Agent 定义（供 AgentRunner 等场景使用）
  */
@@ -12,12 +12,11 @@ export function createCodingAgent() {
     };
 }
 /**
- * 按方案逐文件生成代码（与 cli.mjs 一致，避免 tool-use 循环输出不可解析）
+ * 批量生成代码：一次 LLM 调用生成所有文件，agent 可以看到全局上下文
  */
-export async function runCoding(llmClient, promptManager, plan, sandboxPath, projectContext, lessonsHint) {
+export async function runCoding(llmClient, promptManager, plan, sandboxPath, projectContext, lessonsHint, previousOutputs, testError) {
     const systemPrompt = await promptManager.load('coding');
-    const results = [];
-    // 构建项目约束 + 错误反馈 + 历史教训
+    // 构建项目约束
     let constraintsHint = '';
     if (projectContext?.constraints) {
         const entries = Object.entries(projectContext.constraints);
@@ -29,33 +28,176 @@ export async function runCoding(llmClient, promptManager, plan, sandboxPath, pro
     if (lessonsHint) {
         constraintsHint += lessonsHint;
     }
+    // 读取项目结构（目录树）
+    const projectTree = await getProjectTree(sandboxPath, 3);
+    // 读取所有 plan 文件的原始内容
+    const fileContexts = [];
     for (const file of plan) {
-        // 路径穿越检查
         const fullPath = resolve(sandboxPath, file.path);
-        if (!fullPath.startsWith(resolve(sandboxPath))) {
-            continue; // 跳过越界路径
-        }
+        if (!fullPath.startsWith(resolve(sandboxPath)))
+            continue;
         let originalContent = '';
         try {
             originalContent = await readFile(fullPath, 'utf-8');
         }
         catch {
-            // 新文件，无原始内容
+            originalContent = '（新文件，不存在）';
         }
-        const userMessage = `技术方案条目：\n${JSON.stringify(file, null, 2)}\n\n原始文件 ${file.path}：\n\`\`\`\n${originalContent}\n\`\`\`\n\n请输出修改后的完整文件，JSON 格式包含 path、content、summary。${constraintsHint}`;
-        const response = await llmClient.simpleChat(systemPrompt, userMessage, 'coding');
-        const parsed = parseCodingFileResponse(response, file.path, file.changeDescription);
-        if (parsed) {
-            results.push(parsed);
-        }
-        else {
-            console.error(`[coding] 文件 ${file.path} 的 LLM 输出解析失败，跳过。response 前200字: ${response?.slice(0, 200)}`);
-        }
+        fileContexts.push(`### ${file.path}\n${file.changeDescription ? `操作: ${file.changeDescription}` : ''}\n\`\`\`\n${originalContent}\n\`\`\``);
     }
+    // 读取关键上下文文件（main.jsx, router 等）
+    const contextFiles = await readContextFiles(sandboxPath);
+    let contextHint = '';
+    if (contextFiles.length > 0) {
+        contextHint = '\n\n## 关键上下文文件\n' + contextFiles.join('\n\n');
+    }
+    // 构建错误反馈（重试时）
+    let errorHint = '';
+    if (testError) {
+        errorHint = `\n\n## 上轮测试失败\n${testError}\n请分析错误原因并修正代码。`;
+    }
+    if (previousOutputs && previousOutputs.length > 0) {
+        errorHint += '\n\n## 上轮生成的代码（仅供参考，请修正错误后重新生成）\n' +
+            previousOutputs.map(f => `### ${f.path}\n\`\`\`\n${f.content.slice(0, 500)}${f.content.length > 500 ? '\n...(截断)' : ''}\n\`\`\``).join('\n');
+    }
+    const userMessage = `## 技术方案（需要生成的文件）\n${plan.map(f => `- ${f.path}: ${f.changeDescription}`).join('\n')}
+
+## 项目目录结构
+\`\`\`
+${projectTree}
+\`\`\`
+
+## 各文件原始内容
+${fileContexts.join('\n\n')}
+${contextHint}${constraintsHint}${errorHint}
+
+请输出所有文件的修改结果，JSON 数组格式。`;
+    const response = await llmClient.simpleChat(systemPrompt, userMessage, 'coding');
+    return parseCodingBatchResponse(response, plan);
+}
+/**
+ * 解析批量编码结果：JSON 数组
+ */
+function parseCodingBatchResponse(response, plan) {
+    if (!response?.trim())
+        return [];
+    const results = [];
+    // 尝试解析 JSON 数组
+    const jsonMatch = response.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+        try {
+            const arr = JSON.parse(jsonMatch[0]);
+            if (Array.isArray(arr)) {
+                for (const item of arr) {
+                    if (item?.path && item?.content) {
+                        results.push({
+                            path: item.path,
+                            content: String(item.content),
+                            summary: item.summary ?? '',
+                        });
+                    }
+                }
+                if (results.length > 0)
+                    return results;
+            }
+        }
+        catch { }
+    }
+    // 尝试解析单个 JSON 对象
+    const braceMatch = response.match(/\{[\s\S]*?\}/);
+    if (braceMatch) {
+        try {
+            const obj = JSON.parse(braceMatch[0]);
+            if (obj?.path && obj?.content) {
+                return [{ path: obj.path, content: String(obj.content), summary: obj.summary ?? '' }];
+            }
+        }
+        catch { }
+    }
+    // 尝试从 markdown 代码块中提取
+    const codeBlocks = response.match(/```(?:json)?\n([\s\S]*?)```/g);
+    if (codeBlocks) {
+        for (const block of codeBlocks) {
+            const inner = block.replace(/```(?:json)?\n/, '').replace(/```$/, '').trim();
+            try {
+                const arr = JSON.parse(inner);
+                if (Array.isArray(arr)) {
+                    for (const item of arr) {
+                        if (item?.path && item?.content) {
+                            results.push({ path: item.path, content: String(item.content), summary: item.summary ?? '' });
+                        }
+                    }
+                }
+                else if (arr?.path && arr?.content) {
+                    results.push({ path: arr.path, content: String(arr.content), summary: arr.summary ?? '' });
+                }
+            }
+            catch { }
+        }
+        if (results.length > 0)
+            return results;
+    }
+    console.error(`[coding] 批量解析失败，response 前300字: ${response?.slice(0, 300)}`);
     return results;
 }
 /**
- * 解析单文件编码结果：JSON、markdown 代码块或纯文本
+ * 获取项目目录树（限制深度）
+ */
+async function getProjectTree(dirPath, maxDepth, currentDepth = 0, prefix = '') {
+    if (currentDepth >= maxDepth)
+        return '';
+    const lines = [];
+    try {
+        const entries = await readdir(dirPath, { withFileTypes: true });
+        const filtered = entries
+            .filter(e => !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== 'dist' && e.name !== 'build')
+            .sort((a, b) => {
+            if (a.isDirectory() !== b.isDirectory())
+                return a.isDirectory() ? -1 : 1;
+            return a.name.localeCompare(b.name);
+        });
+        for (let i = 0; i < filtered.length; i++) {
+            const entry = filtered[i];
+            const isLast = i === filtered.length - 1;
+            const connector = isLast ? '└── ' : '├── ';
+            const childPrefix = isLast ? '    ' : '│   ';
+            lines.push(`${prefix}${connector}${entry.name}`);
+            if (entry.isDirectory()) {
+                const subTree = await getProjectTree(join(dirPath, entry.name), maxDepth, currentDepth + 1, prefix + childPrefix);
+                if (subTree)
+                    lines.push(subTree);
+            }
+        }
+    }
+    catch { }
+    return lines.join('\n');
+}
+/**
+ * 读取关键上下文文件（main.jsx, router, package.json 等）
+ */
+async function readContextFiles(sandboxPath) {
+    const contextFiles = [];
+    const candidates = [
+        'frontend/src/main.jsx',
+        'frontend/src/main.tsx',
+        'frontend/src/router.jsx',
+        'frontend/src/router.tsx',
+        'frontend/src/App.jsx',
+        'frontend/src/App.tsx',
+        'frontend/package.json',
+        'package.json',
+    ];
+    for (const file of candidates) {
+        try {
+            const content = await readFile(join(sandboxPath, file), 'utf-8');
+            contextFiles.push(`### ${file}\n\`\`\`\n${content}\n\`\`\``);
+        }
+        catch { }
+    }
+    return contextFiles;
+}
+/**
+ * 解析单文件编码结果（兼容旧接口）
  */
 export function parseCodingFileResponse(response, expectedPath, defaultSummary) {
     if (!response?.trim())
@@ -69,12 +211,10 @@ export function parseCodingFileResponse(response, expectedPath, defaultSummary) 
         const fromBlockJson = tryParseCodingJson(block, expectedPath, defaultSummary);
         if (fromBlockJson)
             return fromBlockJson;
-        // 仅当代码块是源码（非 JSON 元数据）时才作为文件内容
         if (block.length > 0 && !block.trimStart().startsWith('{') && !block.trimStart().startsWith('[')) {
             return { path: expectedPath, content: block, summary: defaultSummary };
         }
     }
-    // 无代码块时，若响应像源码则直接使用
     const trimmed = response.trim();
     if (!trimmed.startsWith('{') && !trimmed.startsWith('[') && trimmed.includes('\n')) {
         return { path: expectedPath, content: trimmed, summary: defaultSummary };
@@ -88,9 +228,7 @@ function tryParseCodingJson(text, expectedPath, defaultSummary) {
             json = JSON.parse(candidate);
             break;
         }
-        catch {
-            // try next candidate
-        }
+        catch { }
     }
     if (!json)
         return null;
@@ -112,7 +250,6 @@ function tryParseCodingJson(text, expectedPath, defaultSummary) {
             };
         }
     }
-    // 单对象未带 path 时回退到方案路径
     if (json.content) {
         return {
             path: json.path ?? expectedPath,
@@ -122,10 +259,8 @@ function tryParseCodingJson(text, expectedPath, defaultSummary) {
     }
     return null;
 }
-/** 从 LLM 回复中提取可能的 JSON 字符串（优先 files 包装结构） */
 function extractJsonCandidates(text) {
     const candidates = [text.trim()];
-    // 非贪婪匹配，避免跨越多个 JSON 对象
     const filesMatch = text.match(/\{[\s\S]*?"files"\s*:\s*\[[\s\S]*?\][\s\S]*?\}/);
     if (filesMatch)
         candidates.unshift(filesMatch[0]);

@@ -303,16 +303,14 @@ export class Orchestrator {
     const commands = projectContext.commands?.lint ? projectContext.commands : { lint: 'npm run lint', test: 'npm test', build: 'npm run build' }
     const pastLessons = await requirementMemory.getLessons(projectId, 'coding', 5)
     let codeOutputs: { path: string; content: string; summary: string }[] = []
+    let previousOutputs: { path: string; content: string; summary: string }[] = []
 
     for (let codeAttempt = 1; codeAttempt <= MAX_RETRIES; codeAttempt++) {
       yield { type: 'executing', phase: `coding (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 30 }
 
       let codingHint = ''
-      if (codeErrors.length > 0) {
-        codingHint = '\n\n## 上轮编码/测试失败\n' + codeErrors[codeErrors.length - 1] + '\n请修正以上错误后重新生成代码。'
-      }
       if (pastLessons.length > 0) {
-        codingHint += '\n\n## 历史失败教训（请避免重复以下错误）\n' +
+        codingHint = '\n\n## 历史失败教训（请避免重复以下错误）\n' +
           pastLessons.map(l => `- [${l.phase}/${l.filePath ?? 'general'}] ${l.errorSummary}`).join('\n')
       }
 
@@ -325,10 +323,13 @@ export class Orchestrator {
       } else {
         const planFiles = requirement.plan ?? []
         yield { type: 'executing', phase: `coding-agent (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 35 }
+        const lastTestError = codeErrors.length > 0 ? codeErrors[codeErrors.length - 1] : undefined
         codeOutputs = await runCoding(
           llmClient, promptManager, planFiles, sandbox.path,
           projectContext,
           codingHint || undefined,
+          codeAttempt > 1 ? previousOutputs : undefined,
+          lastTestError,
         )
       }
 
@@ -377,6 +378,9 @@ export class Orchestrator {
           yield { type: 'executing', phase: `wrote: ${file.path}`, progress: 60 }
         }
       }
+
+      // 保存本轮输出，供下轮重试参考
+      previousOutputs = codeOutputs
 
       // 测试阶段
       yield { type: 'status-change', status: 'testing', agent: 'test' }
