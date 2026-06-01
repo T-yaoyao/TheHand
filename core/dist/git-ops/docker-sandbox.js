@@ -102,21 +102,38 @@ export class DockerSandboxManager {
     }
     async applyToSource(sandbox, files, commitMessage) {
         const resolvedSource = resolve(this.sourcePath);
+        console.log(`[applyToSource] files=${files.length}, sourcePath=${this.sourcePath}, sandboxPath=${sandbox.path}`);
+        let copiedCount = 0;
         for (const file of files) {
             const src = resolve(sandbox.path, file);
             const dest = resolve(this.sourcePath, file);
             // 路径穿越检查
-            if (!src.startsWith(resolve(sandbox.path)) || !dest.startsWith(resolvedSource))
+            if (!src.startsWith(resolve(sandbox.path)) || !dest.startsWith(resolvedSource)) {
+                console.log(`[applyToSource] SKIP (path traversal): ${file}`);
                 continue;
+            }
             await mkdir(join(dest, '..'), { recursive: true });
             await cp(src, dest, { recursive: true });
+            copiedCount++;
+            console.log(`[applyToSource] copied: ${file}`);
         }
+        console.log(`[applyToSource] copied ${copiedCount}/${files.length} files`);
         if (commitMessage) {
             try {
+                // 检查是否有变更
+                const status = execFileSync('git', ['status', '--porcelain'], { cwd: this.sourcePath, timeout: 15_000 }).toString().trim();
+                console.log(`[applyToSource] git status: "${status.slice(0, 200)}"`);
+                if (!status) {
+                    console.log('[applyToSource] nothing to commit, skipping');
+                    return;
+                }
                 execFileSync('git', ['add', '-A'], { cwd: this.sourcePath, timeout: 30_000 });
+                console.log('[applyToSource] git add done');
                 execFileSync('git', ['commit', '-m', commitMessage], { cwd: this.sourcePath, timeout: 30_000 });
+                console.log('[applyToSource] git commit done');
             }
             catch (e) {
+                console.log(`[applyToSource] git error: ${e.message}`);
                 if (!e.message?.includes('nothing to commit'))
                     throw e;
             }
