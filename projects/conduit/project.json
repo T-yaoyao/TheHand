@@ -60,8 +60,12 @@
   },
   "constraints": {
     "routing": "路由在 frontend/src/main.jsx 中用 <Route> 内联定义，不要创建 routes/index.jsx 等独立路由文件",
+    "navbar": "导航入口在 frontend/src/components/Navbar/Navbar.jsx 中用 <NavItem> 添加，不要创建新的 Header/Nav 组件来替代",
     "components": "组件目录结构为 ComponentName/ComponentName.jsx + ComponentName/index.js（re-export），不要创建新的 index.jsx",
     "dependencies": "前端只用 react、react-router-dom、axios，不要引入 antd、material-ui 等未安装的 UI 库",
-    "modification": "修改已有组件时只改需要改的部分，不要整体重写组件"
+    "modification": "修改已有组件时只改需要改的部分，不要整体重写组件。优先修改现有文件，不要创建新文件来实现已有文件能做的事",
+    "api": "后端 API 在 backend/routes/ 中定义，使用 Express Router。新增 API 需要在 backend/index.js 中注册路由",
+    "models": "数据库模型在 backend/models/ 中定义，使用 Sequelize。修改模型后需同步更新 migrations",
+    "styles": "样式用 CSS 文件，不要用 CSS-in-JS 或 CSS Modules。全局样式在 frontend/src/styles.css"
   }
 }

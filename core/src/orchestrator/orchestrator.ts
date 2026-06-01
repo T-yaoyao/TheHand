@@ -337,6 +337,16 @@ export class Orchestrator {
       yield { type: 'executing', phase: 'writing-files', progress: 60 }
       const validOutputs = codeOutputs.filter(f => f.path && f.content)
 
+      // 验证：检查方案中的文件是否都生成了
+      const planFiles = (requirement.plan ?? []).map((f: any) => f.path)
+      const generatedFiles = validOutputs.map(f => f.path)
+      const missingFiles = planFiles.filter((p: string) => !generatedFiles.includes(p))
+      if (missingFiles.length > 0 && validOutputs.length > 0) {
+        const warn = `警告：方案中 ${missingFiles.length} 个文件未生成: ${missingFiles.join(', ')}`
+        codeErrors.push(`第${codeAttempt}轮: ${warn}`)
+        console.log(`[coding] ${warn}`)
+      }
+
       if (validOutputs.length === 0) {
         const err = '编码阶段未生成有效文件'
         codeErrors.push(`第${codeAttempt}轮: ${err}`)
