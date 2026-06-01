@@ -77,60 +77,83 @@ ${contextHint}${constraintsHint}${errorHint}
 }
 /**
  * 解析批量编码结果：JSON 数组
+ * 使用深度计数提取最外层 JSON 片段，正确处理字符串内的括号和转义
  */
 function parseCodingBatchResponse(response, plan) {
     if (!response?.trim())
         return [];
     const results = [];
-    // 优先从 markdown 代码块中提取（LLM 最常见的输出格式）
-    // 用贪婪匹配：从第一个 ```json 后的 [ 到最后一个 ``` 前的 ]
-    const codeBlockStart = response.indexOf('```json');
-    const codeBlockStartAlt = response.indexOf('```');
-    const startIdx = codeBlockStart >= 0 ? codeBlockStart : codeBlockStartAlt;
-    if (startIdx >= 0) {
-        const contentStart = response.indexOf('\n', startIdx) + 1;
-        const lastBackticks = response.lastIndexOf('```');
-        if (lastBackticks > contentStart) {
-            const codeContent = response.slice(contentStart, lastBackticks).trim();
-            try {
-                const parsed = JSON.parse(codeContent);
-                extractFiles(parsed, results);
-                if (results.length > 0)
-                    return results;
+    // 辅助：用深度计数找最外层 JSON 片段
+    function tryExtractByBracket(open, close) {
+        let start = -1;
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        for (let i = 0; i < response.length; i++) {
+            const ch = response[i];
+            if (escape) {
+                escape = false;
+                continue;
             }
-            catch { }
+            if (ch === '\\' && inString) {
+                escape = true;
+                continue;
+            }
+            if (ch === '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString)
+                continue;
+            if (ch === open) {
+                if (depth === 0)
+                    start = i;
+                depth++;
+            }
+            else if (ch === close) {
+                depth--;
+                if (depth === 0 && start !== -1) {
+                    const jsonStr = response.slice(start, i + 1);
+                    try {
+                        const parsed = JSON.parse(jsonStr);
+                        extractFiles(parsed, results);
+                        if (results.length > 0)
+                            return true;
+                    }
+                    catch {
+                        // 继续尝试后面的片段
+                    }
+                    start = -1;
+                }
+            }
         }
+        return false;
     }
-    // 尝试直接解析整个响应为 JSON
+    // 0. 直接解析整个字符串（LLM 返回纯 JSON 的情况）
     try {
-        const parsed = JSON.parse(response.trim());
+        const parsed = JSON.parse(response);
         extractFiles(parsed, results);
         if (results.length > 0)
             return results;
     }
     catch { }
-    // 尝试匹配 JSON 数组（贪婪，匹配最大的 [...]）
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
+    // 1. 从代码块中提取（先处理，因为 LLM 常用代码块包裹 JSON）
+    const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)```/g;
+    let match;
+    while ((match = codeBlockRegex.exec(response)) !== null) {
         try {
-            const parsed = JSON.parse(jsonMatch[0]);
+            const parsed = JSON.parse(match[1].trim());
             extractFiles(parsed, results);
             if (results.length > 0)
                 return results;
         }
         catch { }
     }
-    // 尝试匹配单个 JSON 对象
-    const braceMatch = response.match(/\{[\s\S]*?\}/);
-    if (braceMatch) {
-        try {
-            const obj = JSON.parse(braceMatch[0]);
-            if (obj?.path && obj?.content) {
-                return [{ path: obj.path, content: String(obj.content), summary: obj.summary ?? '' }];
-            }
-        }
-        catch { }
-    }
+    // 2. 用深度计数找最外层 JSON 数组或对象
+    if (tryExtractByBracket('[', ']'))
+        return results;
+    if (tryExtractByBracket('{', '}'))
+        return results;
     console.error(`[coding] batch parse failed, response first 300 chars: ${response?.slice(0, 300)}`);
     return results;
 }
