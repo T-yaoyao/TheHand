@@ -527,9 +527,17 @@ export class Orchestrator {
       return
     }
 
-    // 应用到源仓库
+    // 应用到源仓库 — 从刚提交的 commit 中获取变更文件列表
     yield { type: 'executing', phase: 'applying-to-source', progress: 97 }
-    const changedFiles = await repoManager.getChangedFiles()
+    let changedFiles: string[] = []
+    try {
+      const { stdout } = await repoManager.getLastCommitFiles()
+      changedFiles = stdout.trim().split('\n').filter(Boolean)
+    } catch {}
+    if (changedFiles.length === 0) {
+      // fallback: validOutputs from phaseCoding (if available)
+      changedFiles = (requirement.plan ?? []).map((f: any) => f.path).filter(Boolean)
+    }
     try {
       await sandboxManager.applyToSource(sandbox, changedFiles, commitMsg)
       yield { type: 'executing', phase: 'applied to source', progress: 98 }

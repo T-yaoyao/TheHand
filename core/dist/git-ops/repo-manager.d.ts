@@ -65,9 +65,16 @@ export declare class RepoManager {
         head?: string;
     }): Promise<string>;
     /**
-     * 获取变更的文件列表
+     * 获取变更的文件列表（未提交的变更）
      */
     getChangedFiles(): Promise<string[]>;
+    /**
+     * 获取最近一次 commit 的变更文件列表（用于 commit 后获取文件列表）
+     */
+    getLastCommitFiles(): Promise<{
+        stdout: string;
+        stderr: string;
+    }>;
     /**
      * 获取当前分支名
      */

@@ -407,9 +407,18 @@ export class Orchestrator {
             yield { type: 'failed', requirement, error: `沙箱 commit 失败: ${e.message}`, userMessage: '代码提交失败，可能是沙箱环境的 Git 配置问题。请联系开发者排查。' };
             return;
         }
-        // 应用到源仓库
+        // 应用到源仓库 — 从刚提交的 commit 中获取变更文件列表
         yield { type: 'executing', phase: 'applying-to-source', progress: 97 };
-        const changedFiles = await repoManager.getChangedFiles();
+        let changedFiles = [];
+        try {
+            const { stdout } = await repoManager.getLastCommitFiles();
+            changedFiles = stdout.trim().split('\n').filter(Boolean);
+        }
+        catch { }
+        if (changedFiles.length === 0) {
+            // fallback: validOutputs from phaseCoding (if available)
+            changedFiles = (requirement.plan ?? []).map((f) => f.path).filter(Boolean);
+        }
         try {
             await sandboxManager.applyToSource(sandbox, changedFiles, commitMsg);
             yield { type: 'executing', phase: 'applied to source', progress: 98 };

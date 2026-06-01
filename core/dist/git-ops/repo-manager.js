@@ -137,7 +137,7 @@ export class RepoManager {
         return stdout.trim();
     }
     /**
-     * 获取变更的文件列表
+     * 获取变更的文件列表（未提交的变更）
      */
     async getChangedFiles() {
         const { stdout } = await this.executor('git diff --name-only');
@@ -145,6 +145,12 @@ export class RepoManager {
         const { stdout: untracked } = await this.executor('git ls-files --others --exclude-standard');
         const newFiles = untracked.trim().split('\n').filter(Boolean);
         return [...new Set([...changed, ...newFiles])];
+    }
+    /**
+     * 获取最近一次 commit 的变更文件列表（用于 commit 后获取文件列表）
+     */
+    async getLastCommitFiles() {
+        return this.executor('git diff-tree --no-commit-id --name-only -r HEAD');
     }
     /**
      * 获取当前分支名
