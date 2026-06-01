@@ -449,7 +449,13 @@ export function App() {
                           </ul>
                         )}
                       </div>
-                      <pre className="diff-content"><code>{latestEvent.diff}</code></pre>
+                      {latestEvent.screenshot ? (
+                        <div className="screenshot-preview">
+                          <img src={`data:image/png;base64,${latestEvent.screenshot}`} alt="页面预览" />
+                        </div>
+                      ) : (
+                        <pre className="diff-content"><code>{latestEvent.diff}</code></pre>
+                      )}
                       <div className="plan-actions">
                         <button type="button" className="btn-primary" onClick={async () => {
                           try {

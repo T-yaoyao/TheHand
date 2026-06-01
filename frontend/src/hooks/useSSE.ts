@@ -9,6 +9,7 @@ export interface OrchestratorEvent {
   requirement?: { status?: string; pmInput?: string; structuredRequirement?: unknown; plan?: unknown }
   plan?: { path: string; changeDescription: string; priority?: number }[]
   diff?: string
+  screenshot?: string
   files?: { path: string; summary: string }[]
   questions?: string[]
   passed?: boolean
