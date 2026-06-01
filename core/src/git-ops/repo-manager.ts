@@ -120,15 +120,18 @@ export class RepoManager {
 
   /**
    * 提交代码（通过临时文件传递 message，避免 shell 转义问题）
+   * 注意：executor 可能在 Docker 容器内运行，所以 git 命令必须用相对路径
    */
   async commit(message: string): Promise<CommitResult> {
     await this.stageAll()
-    const msgFile = join(this.sandboxPath, '.git', 'COMMIT_MSG_TMP')
+    // 写入临时文件（用宿主机路径，因为 sandbox 目录是 volume 挂载的）
+    const hostMsgFile = join(this.sandboxPath, '.git', 'COMMIT_MSG_TMP')
     try {
-      writeFileSync(msgFile, message, 'utf-8')
-      await this.executor(`git commit -F "${msgFile}"`)
+      writeFileSync(hostMsgFile, message, 'utf-8')
+      // 用相对路径，这样无论在宿主机还是容器内都能找到文件
+      await this.executor('git commit -F .git/COMMIT_MSG_TMP')
     } finally {
-      try { unlinkSync(msgFile) } catch {}
+      try { unlinkSync(hostMsgFile) } catch {}
     }
     const { stdout } = await this.executor('git rev-parse --short HEAD')
     return { hash: stdout.trim(), message }

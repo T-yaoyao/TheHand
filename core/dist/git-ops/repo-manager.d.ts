@@ -48,6 +48,7 @@ export declare class RepoManager {
     stageAll(): Promise<void>;
     /**
      * 提交代码（通过临时文件传递 message，避免 shell 转义问题）
+     * 注意：executor 可能在 Docker 容器内运行，所以 git 命令必须用相对路径
      */
     commit(message: string): Promise<CommitResult>;
     /**
