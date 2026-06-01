@@ -1,6 +1,6 @@
 import { exec, execFileSync } from 'child_process';
 import { promisify } from 'util';
-import { mkdtemp, rm, mkdir, cp, readdir } from 'fs/promises';
+import { mkdtemp, rm, mkdir, cp, readdir, access, unlink } from 'fs/promises';
 import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
@@ -104,6 +104,7 @@ export class DockerSandboxManager {
         const resolvedSource = resolve(this.sourcePath);
         console.log(`[applyToSource] files=${files.length}, sourcePath=${this.sourcePath}, sandboxPath=${sandbox.path}`);
         let copiedCount = 0;
+        let deletedCount = 0;
         for (const file of files) {
             const src = resolve(sandbox.path, file);
             const dest = resolve(this.sourcePath, file);
@@ -112,12 +113,27 @@ export class DockerSandboxManager {
                 console.log(`[applyToSource] SKIP (path traversal): ${file}`);
                 continue;
             }
-            await mkdir(join(dest, '..'), { recursive: true });
-            await cp(src, dest, { recursive: true });
-            copiedCount++;
-            console.log(`[applyToSource] copied: ${file}`);
+            // 检查源文件是否存在：存在则复制，不存在则删除目标
+            try {
+                await access(src);
+                await mkdir(join(dest, '..'), { recursive: true });
+                await cp(src, dest, { recursive: true });
+                copiedCount++;
+                console.log(`[applyToSource] copied: ${file}`);
+            }
+            catch {
+                // 源文件不存在 = 被 coding agent 删除
+                try {
+                    await unlink(dest);
+                    deletedCount++;
+                    console.log(`[applyToSource] deleted: ${file}`);
+                }
+                catch {
+                    // 目标文件也不存在，忽略
+                }
+            }
         }
-        console.log(`[applyToSource] copied ${copiedCount}/${files.length} files`);
+        console.log(`[applyToSource] copied ${copiedCount}, deleted ${deletedCount}, total ${files.length}`);
         if (commitMessage) {
             try {
                 // 检查是否有变更
