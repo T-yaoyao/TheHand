@@ -55,7 +55,7 @@
   },
   "commands": {
     "lint": "echo 'lint skipped in sandbox'",
-    "test": "echo 'backend tests skipped (no PostgreSQL in sandbox) - verified by frontend build'",
+    "test": "cd frontend && npx vitest run",
     "build": "npm run build -w frontend"
   },
   "constraints": {
