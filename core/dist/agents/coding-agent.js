@@ -82,28 +82,37 @@ function parseCodingBatchResponse(response, plan) {
     if (!response?.trim())
         return [];
     const results = [];
-    // 尝试解析 JSON 数组
-    const jsonMatch = response.match(/\[[\s\S]*\]/);
-    if (jsonMatch) {
+    // 优先从 markdown 代码块中提取（LLM 最常见的输出格式）
+    const codeBlockMatch = response.match(/```(?:json)?\s*\n([\s\S]*?)```/);
+    if (codeBlockMatch) {
         try {
-            const arr = JSON.parse(jsonMatch[0]);
-            if (Array.isArray(arr)) {
-                for (const item of arr) {
-                    if (item?.path && item?.content) {
-                        results.push({
-                            path: item.path,
-                            content: String(item.content),
-                            summary: item.summary ?? '',
-                        });
-                    }
-                }
-                if (results.length > 0)
-                    return results;
-            }
+            const parsed = JSON.parse(codeBlockMatch[1].trim());
+            extractFiles(parsed, results);
+            if (results.length > 0)
+                return results;
         }
         catch { }
     }
-    // 尝试解析单个 JSON 对象
+    // 尝试直接解析整个响应为 JSON
+    try {
+        const parsed = JSON.parse(response.trim());
+        extractFiles(parsed, results);
+        if (results.length > 0)
+            return results;
+    }
+    catch { }
+    // 尝试匹配 JSON 数组（贪婪，匹配最大的 [...]）
+    const jsonMatch = response.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+        try {
+            const parsed = JSON.parse(jsonMatch[0]);
+            extractFiles(parsed, results);
+            if (results.length > 0)
+                return results;
+        }
+        catch { }
+    }
+    // 尝试匹配单个 JSON 对象
     const braceMatch = response.match(/\{[\s\S]*?\}/);
     if (braceMatch) {
         try {
@@ -114,31 +123,26 @@ function parseCodingBatchResponse(response, plan) {
         }
         catch { }
     }
-    // 尝试从 markdown 代码块中提取
-    const codeBlocks = response.match(/```(?:json)?\n([\s\S]*?)```/g);
-    if (codeBlocks) {
-        for (const block of codeBlocks) {
-            const inner = block.replace(/```(?:json)?\n/, '').replace(/```$/, '').trim();
-            try {
-                const arr = JSON.parse(inner);
-                if (Array.isArray(arr)) {
-                    for (const item of arr) {
-                        if (item?.path && item?.content) {
-                            results.push({ path: item.path, content: String(item.content), summary: item.summary ?? '' });
-                        }
-                    }
-                }
-                else if (arr?.path && arr?.content) {
-                    results.push({ path: arr.path, content: String(arr.content), summary: arr.summary ?? '' });
-                }
-            }
-            catch { }
-        }
-        if (results.length > 0)
-            return results;
-    }
-    console.error(`[coding] 批量解析失败，response 前300字: ${response?.slice(0, 300)}`);
+    console.error(`[coding] batch parse failed, response first 300 chars: ${response?.slice(0, 300)}`);
     return results;
+}
+function extractFiles(parsed, results) {
+    const items = [];
+    if (Array.isArray(parsed))
+        items.push(...parsed);
+    else if (parsed?.files && Array.isArray(parsed.files))
+        items.push(...parsed.files);
+    else if (parsed?.path && parsed?.content)
+        items.push(parsed);
+    for (const item of items) {
+        if (item?.path && item?.content) {
+            results.push({
+                path: item.path,
+                content: String(item.content),
+                summary: item.summary ?? '',
+            });
+        }
+    }
 }
 /**
  * 获取项目目录树（限制深度）
