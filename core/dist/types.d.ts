@@ -179,6 +179,7 @@ export type OrchestratorEvent = {
     type: 'diff-ready';
     requirement: Requirement;
     diff: string;
+    screenshot?: string;
     files: {
         path: string;
         summary: string;

@@ -233,7 +233,7 @@ export type OrchestratorEvent =
   | { type: 'status-change'; status: RequirementStatus; agent: string }
   | { type: 'waiting-for-pm'; requirement: Requirement; questions: string[] }
   | { type: 'plan-ready'; plan: FilePlan[]; requirement: Requirement }
-  | { type: 'diff-ready'; requirement: Requirement; diff: string; files: { path: string; summary: string }[] }
+  | { type: 'diff-ready'; requirement: Requirement; diff: string; screenshot?: string; files: { path: string; summary: string }[] }
   | { type: 'executing'; phase: string; progress: number }
   | { type: 'test-result'; passed: boolean; details: string }
   | { type: 'completed'; requirement: Requirement; prUrl?: string; sandboxPath?: string }
