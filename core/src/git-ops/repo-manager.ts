@@ -1,3 +1,5 @@
+import { writeFileSync, unlinkSync } from 'fs'
+import { join } from 'path'
 import type { CommandExecutor } from './executor.js'
 import { createHostExecutor } from './executor.js'
 
@@ -117,11 +119,17 @@ export class RepoManager {
   }
 
   /**
-   * 提交代码
+   * 提交代码（通过临时文件传递 message，避免 shell 转义问题）
    */
   async commit(message: string): Promise<CommitResult> {
     await this.stageAll()
-    await this.executor(`git commit -m '${message.replace(/'/g, "'\\''")}'`)
+    const msgFile = join(this.sandboxPath, '.git', 'COMMIT_MSG_TMP')
+    try {
+      writeFileSync(msgFile, message, 'utf-8')
+      await this.executor(`git commit -F "${msgFile}"`)
+    } finally {
+      try { unlinkSync(msgFile) } catch {}
+    }
     const { stdout } = await this.executor('git rev-parse --short HEAD')
     return { hash: stdout.trim(), message }
   }

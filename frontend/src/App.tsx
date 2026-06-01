@@ -100,7 +100,15 @@ export function App() {
       refreshList()
       api.getConversations(selected.id).then(setConversations).catch(() => {})
     }
-    if (latestEvent.type === 'status-change' || latestEvent.type === 'completed' || latestEvent.type === 'failed') {
+    if (latestEvent.type === 'status-change') {
+      refreshList()
+      // 仅在终态清除 thinking，中间态（coding/planning/testing）保持
+      const terminalStatuses = ['done', 'failed', 'clarified', 'reverted']
+      if (terminalStatuses.includes(latestEvent.status ?? '')) {
+        setThinking(false)
+      }
+    }
+    if (latestEvent.type === 'completed' || latestEvent.type === 'failed') {
       refreshList()
       setThinking(false)
     }

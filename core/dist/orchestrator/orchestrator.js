@@ -98,6 +98,15 @@ export class Orchestrator {
             requirement.structuredRequirement = clarificationResult.requirement;
             requirement.status = 'clarified';
             await requirementMemory.saveRequirement(requirement);
+            // 澄清完成，保存提示消息给用户
+            await requirementMemory.addConversation({
+                id: crypto.randomUUID(),
+                requirementId: requirement.id,
+                role: 'system',
+                content: '✅ 澄清完成，开始生成方案…',
+                round: currentRound,
+                createdAt: new Date(),
+            });
             yield { type: 'status-change', status: 'clarified', agent: 'clarification' };
             // 3. 方案阶段（自愈重试，最多 3 轮）
             yield { type: 'status-change', status: 'planning', agent: 'plan' };

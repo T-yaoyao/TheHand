@@ -47,7 +47,7 @@ export declare class RepoManager {
      */
     stageAll(): Promise<void>;
     /**
-     * 提交代码
+     * 提交代码（通过临时文件传递 message，避免 shell 转义问题）
      */
     commit(message: string): Promise<CommitResult>;
     /**
