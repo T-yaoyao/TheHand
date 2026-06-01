@@ -55,7 +55,7 @@
   },
   "commands": {
     "lint": "echo 'lint skipped in sandbox'",
-    "test": "cd frontend && npx vitest run",
+    "test": "npx vitest run",
     "build": "npm run build -w frontend"
   },
   "constraints": {
