@@ -25,3 +25,6 @@ __pycache__/
 
 # sandbox-repo（不需要提交到 SuperMan 仓库）
 sandbox-repo/
+
+# 运行时数据
+data/
