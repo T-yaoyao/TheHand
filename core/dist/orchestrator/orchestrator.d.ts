@@ -53,6 +53,7 @@ export declare class Orchestrator {
      */
     continueWithPMReply(requirement: Requirement, pmReply: string, projectId?: string): AsyncGenerator<OrchestratorEvent>;
     private parsePlan;
+    private extractRouteFromPlan;
     private isTerminal;
     private selectAgent;
 }

@@ -359,6 +359,24 @@ export class Orchestrator {
             }
             catch { }
         }
+        // Take page screenshot
+        let screenshot = null;
+        if ('startDevServer' in sandboxManager && 'takeScreenshot' in sandboxManager) {
+            try {
+                yield { type: 'executing', phase: 'starting dev server', progress: 85 };
+                const sm = sandboxManager;
+                const serverStarted = await sm.startDevServer(3000, 30_000);
+                if (serverStarted) {
+                    yield { type: 'executing', phase: 'taking screenshot', progress: 87 };
+                    const planForRoute = requirement.plan ?? [];
+                    const route = this.extractRouteFromPlan(planForRoute);
+                    screenshot = await sm.takeScreenshot(3000, route);
+                }
+            }
+            catch {
+                // Screenshot failed, fallback to diff
+            }
+        }
         requirement.status = 'diff-ready';
         await requirementMemory.saveRequirement(requirement);
         this.sandboxShouldCleanup = false; // 暂停点，保留沙箱供后续 commit
@@ -366,6 +384,7 @@ export class Orchestrator {
             type: 'diff-ready',
             requirement,
             diff: diffContent,
+            screenshot: screenshot ?? undefined,
             files: validOutputs.map(f => ({ path: f.path, summary: f.summary })),
         };
         return;
@@ -430,6 +449,18 @@ export class Orchestrator {
         if (output.plan && Array.isArray(output.plan))
             return output.plan;
         return [];
+    }
+    extractRouteFromPlan(plan) {
+        for (const file of plan) {
+            const path = file.path.toLowerCase();
+            if (path.includes('/pages/') || path.includes('/views/') || path.includes('/routes/')) {
+                const name = file.path.split('/').pop()?.replace(/\.(tsx?|vue|jsx?)$/, '') ?? '';
+                if (name && name !== 'index' && name !== 'App') {
+                    return `/${name.toLowerCase()}`;
+                }
+            }
+        }
+        return '/';
     }
     isTerminal(status) {
         return status === 'done' || status === 'failed';
