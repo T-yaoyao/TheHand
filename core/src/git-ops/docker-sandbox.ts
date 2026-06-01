@@ -164,6 +164,73 @@ export class DockerSandboxManager {
     }
   }
 
+  async takeScreenshot(port = 3000, route = '/'): Promise<string | null> {
+    const entry = this.activeSandboxes.values().next().value
+    if (!entry) return null
+
+    try {
+      const pyScript = [
+        'import sys',
+        'try:',
+        '    from playwright.sync_api import sync_playwright',
+        '    with sync_playwright() as p:',
+        '        browser = p.chromium.launch()',
+        "        page = browser.new_page(viewport={'width': 1280, 'height': 720})",
+        `        page.goto('http://localhost:${port}${route}', timeout=15000)`,
+        "        page.wait_for_load_state('networkidle', timeout=10000)",
+        "        page.screenshot(path='/sandbox/.screenshot.png', full_page=True)",
+        '        browser.close()',
+        "    print('OK')",
+        'except Exception as e:',
+        "    print(f'FAIL: {e}', file=sys.stderr)",
+        '    sys.exit(1)',
+      ].join('\n')
+
+      const result = await this.dockerExec(entry.containerName, `python3 -c '${pyScript}'`)
+      if (result.exitCode !== 0) return null
+
+      const { stdout: base64 } = await this.dockerExec(
+        entry.containerName,
+        'base64 -w0 /sandbox/.screenshot.png',
+      )
+      return base64.trim() || null
+    } catch {
+      return null
+    }
+  }
+
+  async startDevServer(port = 3000, timeoutMs = 30_000): Promise<boolean> {
+    const entry = this.activeSandboxes.values().next().value
+    if (!entry) return false
+
+    try {
+      // Start dev server in background
+      await this.dockerExec(entry.containerName, 'cd /sandbox && npm run dev &')
+    } catch {
+      // Ignore immediate errors from background process
+    }
+
+    // Poll until the server responds or timeout
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      try {
+        const result = await this.dockerExec(
+          entry.containerName,
+          `curl -s -o /dev/null -w '%{http_code}' http://localhost:${port}`,
+          5_000,
+        )
+        if (result.exitCode === 0 && result.stdout.trim().match(/^[23]/)) {
+          return true
+        }
+      } catch {
+        // Server not ready yet, keep polling
+      }
+      await new Promise((r) => setTimeout(r, 1000))
+    }
+
+    return false
+  }
+
   async cleanupAll(): Promise<void> {
     await Promise.all(
       Array.from(this.activeSandboxes.values()).map(({ sandbox }) => sandbox.cleanup()),

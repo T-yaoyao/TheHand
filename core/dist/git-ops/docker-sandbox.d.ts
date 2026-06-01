@@ -29,6 +29,8 @@ export declare class DockerSandboxManager {
     getExecutor(sandbox: Sandbox): CommandExecutor;
     applyToSource(sandbox: Sandbox, files: string[], commitMessage?: string): Promise<void>;
     getDiff(sandbox: Sandbox): Promise<string>;
+    takeScreenshot(port?: number, route?: string): Promise<string | null>;
+    startDevServer(port?: number, timeoutMs?: number): Promise<boolean>;
     cleanupAll(): Promise<void>;
     getActiveCount(): number;
     private ensureImage;
