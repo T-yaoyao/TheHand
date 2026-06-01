@@ -23,4 +23,11 @@ export declare function queryOne(sql: string, params?: any[]): any | null;
  * 执行写操作
  */
 export declare function execute(sql: string, params?: any[]): void;
+/**
+ * 批量执行写操作（事务包裹，只落盘一次）
+ */
+export declare function executeBatch(operations: {
+    sql: string;
+    params?: any[];
+}[]): void;
 //# sourceMappingURL=db.d.ts.map

@@ -1,4 +1,4 @@
-import { queryAll, queryOne, execute } from './db.js';
+import { queryAll, queryOne, execute, executeBatch } from './db.js';
 import { randomUUID } from 'crypto';
 function rowToRequirement(row) {
     let structuredRequirement = null;
@@ -110,9 +110,10 @@ export class DbRequirementMemory {
         execute(`UPDATE lessons SET resolved = 1 WHERE id = ?`, [id]);
     }
     async saveChanges(requirementId, files) {
-        for (const file of files) {
-            execute(`INSERT INTO change_history (id, requirement_id, file_path, action) VALUES (?, ?, ?, ?)`, [randomUUID(), requirementId, file.path, file.action]);
-        }
+        executeBatch(files.map(file => ({
+            sql: `INSERT INTO change_history (id, requirement_id, file_path, action) VALUES (?, ?, ?, ?)`,
+            params: [randomUUID(), requirementId, file.path, file.action],
+        })));
     }
     async getChanges(requirementId) {
         const rows = queryAll(`SELECT * FROM change_history WHERE requirement_id = ? ORDER BY created_at ASC`, [requirementId]);
