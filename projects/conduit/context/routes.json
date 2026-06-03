@@ -1,0 +1,31 @@
+{
+  "articles": {
+    "GET /api/articles": "获取文章列表（支持分页、筛选）",
+    "GET /api/articles/feed": "获取关注用户的文章",
+    "GET /api/articles/:slug": "获取单篇文章",
+    "POST /api/articles": "创建文章",
+    "PUT /api/articles/:slug": "更新文章",
+    "DELETE /api/articles/:slug": "删除文章",
+    "POST /api/articles/:slug/favorite": "收藏文章",
+    "DELETE /api/articles/:slug/favorite": "取消收藏"
+  },
+  "comments": {
+    "GET /api/articles/:slug/comments": "获取文章评论",
+    "POST /api/articles/:slug/comments": "添加评论",
+    "DELETE /api/articles/:slug/comments/:id": "删除评论"
+  },
+  "users": {
+    "POST /api/users": "用户注册",
+    "POST /api/users/login": "用户登录",
+    "GET /api/user": "获取当前用户",
+    "PUT /api/user": "更新用户信息"
+  },
+  "profiles": {
+    "GET /api/profiles/:username": "获取用户资料",
+    "POST /api/profiles/:username/follow": "关注用户",
+    "DELETE /api/profiles/:username/follow": "取消关注"
+  },
+  "tags": {
+    "GET /api/tags": "获取所有标签"
+  }
+}

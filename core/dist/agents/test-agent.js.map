@@ -1,0 +1,1 @@
+{"version":3,"file":"test-agent.js","sourceRoot":"","sources":["../../src/agents/test-agent.ts"],"names":[],"mappings":"AAEA;;GAEG;AACH,MAAM,UAAU,eAAe;IAC7B,OAAO;QACL,IAAI,EAAE,MAAM;QACZ,WAAW,EAAE,4BAA4B;QACzC,YAAY,EAAE;;;;;;;;;;;;;;;;;;EAkBhB;QACE,KAAK,EAAE,CAAC,OAAO,EAAE,WAAW,EAAE,YAAY,CAAC;QAC3C,SAAS,EAAE,CAAC;KACb,CAAA;AACH,CAAC"}
