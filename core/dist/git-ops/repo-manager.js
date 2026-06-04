@@ -31,7 +31,7 @@ export class RepoManager {
         }
     }
     /**
-     * Diff 检查：检测是否有预期外的文件变更
+     * Diff 检查：检测是否有预期外的文件变更，同时校验所有计划内文件都已变更
      */
     async diffCheck(expectedFiles) {
         try {
@@ -41,17 +41,28 @@ export class RepoManager {
             const { stdout: untracked } = await this.executor('git ls-files --others --exclude-standard');
             const newFiles = untracked.trim().split('\n').filter(Boolean);
             const allChanged = [...new Set([...changedFiles, ...newFiles])];
+            // 正向校验：不多改一个文件
             const unexpectedFiles = allChanged.filter(f => !expectedFiles.includes(f));
+            // 反向校验：不少改一个文件
+            const missingPlannedFiles = expectedFiles.filter(f => !allChanged.includes(f));
             // 获取 diff 统计
-            let diffSummary = '';
+            let diffSummaryParts = [];
             try {
                 const { stdout: stat } = await this.executor('git diff --stat');
-                diffSummary = stat.trim();
+                diffSummaryParts.push(stat.trim());
             }
             catch { }
+            if (unexpectedFiles.length > 0) {
+                diffSummaryParts.push(`⚠️ 检测到 ${unexpectedFiles.length} 个不在计划内的变更文件: ${unexpectedFiles.join(', ')}`);
+            }
+            if (missingPlannedFiles.length > 0) {
+                diffSummaryParts.push(`❌ 检测到 ${missingPlannedFiles.length} 个计划文件未产生任何变更: ${missingPlannedFiles.join(', ')}`);
+            }
+            const diffSummary = diffSummaryParts.join('\n');
             return {
-                hasUnexpectedChanges: unexpectedFiles.length > 0,
+                hasUnexpectedChanges: unexpectedFiles.length > 0 || missingPlannedFiles.length > 0,
                 unexpectedFiles,
+                missingPlannedFiles,
                 changedFiles: allChanged,
                 diffSummary,
             };

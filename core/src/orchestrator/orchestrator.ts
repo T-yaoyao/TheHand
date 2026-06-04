@@ -10,6 +10,7 @@ import type {
   FilePlan,
   RiskAssessment,
   NaturalLanguageSummary,
+  FileValidationSummary,
 } from '../types.js'
 import type { AgentRunner } from '../agents/agent-runner.js'
 import type { SkillRegistry } from '../skill-registry/skill-registry.js'
@@ -18,6 +19,7 @@ import type { PromptManager } from '../llm/prompt-manager.js'
 import { runClarification } from '../agents/clarification-agent.js'
 import { createPlanAgent } from '../agents/plan-agent.js'
 import { runCoding } from '../agents/coding-agent.js'
+import { join, dirname } from 'path'
 import type { Sandbox } from '../git-ops/sandbox.js'
 import type { DockerSandboxManager } from '../git-ops/docker-sandbox.js'
 import type { CommandExecutor } from '../git-ops/executor.js'
@@ -186,6 +188,28 @@ export class Orchestrator {
       }
 
       requirement.structuredRequirement = clarificationResult.requirement
+
+      // 隐患2修复：如果是第3轮兜底生成的默认需求，进入needs-confirmation状态等待PM确认
+      if (requirement.structuredRequirement?.isDefaulted) {
+        requirement.status = 'needs-confirmation'
+        await requirementMemory.saveRequirement(requirement)
+        this.sandboxShouldCleanup = false
+        await requirementMemory.addConversation({
+          id: crypto.randomUUID(),
+          requirementId: requirement.id,
+          role: 'system',
+          content: '⚠️ 信息不足，系统已用合理默认值填充结构化需求，请确认后继续。',
+          round: currentRound,
+          createdAt: new Date(),
+        })
+        yield {
+          type: 'waiting-for-pm',
+          requirement: { ...requirement, status: 'needs-confirmation' },
+          questions: ['当前需求信息不完整，系统已自动填充默认值，请确认结构化需求是否正确，确认后继续生成方案。'],
+        }
+        return
+      }
+
       requirement.status = 'clarified'
       await requirementMemory.saveRequirement(requirement)
 
@@ -357,11 +381,11 @@ export class Orchestrator {
     const MAX_RETRIES = 3
     const codeErrors: string[] = []
     const { writeFile, mkdir, rm } = await import('fs/promises')
-    const { dirname, join } = await import('path')
     const commands = projectContext.commands?.lint ? projectContext.commands : { lint: 'npm run lint', test: 'npm test', build: 'npm run build' }
     const pastLessons = await requirementMemory.getLessons(projectId, 'coding', 5)
     let codeOutputs: { path: string; content: string; summary: string }[] = []
     let previousOutputs: { path: string; content: string; summary: string }[] = []
+    let finalFileValidationSummary: FileValidationSummary | null = null
 
     for (let codeAttempt = 1; codeAttempt <= MAX_RETRIES; codeAttempt++) {
       yield { type: 'executing', phase: `coding (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 30 }
@@ -391,49 +415,143 @@ export class Orchestrator {
         )
       }
 
-      // 写入文件到沙箱 - 第一性原理绝对不丢文件机制
-      yield { type: 'executing', phase: 'writing-files', progress: 60 }
+      // ──────────────────────────────────────────────────────────────
+      // 分级告警兜底机制 v1.0
+      // 从"静默兜底"升级为"三级分级处理"，彻底杜绝静默失败
+      // ──────────────────────────────────────────────────────────────
+      yield { type: 'executing', phase: 'validating-files', progress: 50 }
       const planFilesFull = requirement.plan ?? []
-      
-      // 1. 构建文件映射表，所有 plan 里的文件 100% 必须存在
+      const { readFile } = await import('fs/promises')
+
+      // ── 辅助判定函数 ──
+      function isCriticalFile(changeDesc: string): boolean {
+        const CRITICAL_KEYWORDS = [
+          '新增', 'add', 'Add', 'ADD',
+          '修改', 'update', 'Update', 'UPDATE',
+          '重构', 'refactor', 'Refactor',
+          '删除', 'delete', 'Delete', 'DELETE',
+          '实现', 'implement', 'Implement',
+        ]
+        const lower = changeDesc.toLowerCase()
+        return CRITICAL_KEYWORDS.some(k => lower.includes(k.toLowerCase()))
+      }
+
+      function isSafeToFallback(filePath: string, changeDesc: string): boolean {
+        const SAFE_EXT_PATTERNS = [/\.md$/, /\.txt$/, /\.json$/, /\.yaml$/, /\.yml$/]
+        if (SAFE_EXT_PATTERNS.some(p => p.test(filePath))) return true
+        
+        const SUSPICIOUS_KEYWORDS = ['参考', '查看', '阅读', 'refer', 'read', '了解', '分析', 'analyze']
+        const lowerDesc = changeDesc.toLowerCase()
+        return SUSPICIOUS_KEYWORDS.some(k => lowerDesc.includes(k.toLowerCase()))
+      }
+
+      // ── 1. 构建文件映射表 ──
       const fileMap = new Map<string, { path: string; content: string; summary: string }>()
-      
-      // 2. 先把 LLM 返回的结果全部放进去
       for (const output of codeOutputs) {
         if (output.path) {
           fileMap.set(output.path, output)
         }
       }
 
-      // 3. 遍历所有 plan 文件，缺失的绝对不能丢
+      // ── 2. 分级校验所有 plan 文件 ──
+      const fullyGenerated: string[] = []
+      const fallbackOriginal: string[] = []
+      const criticalMissing: string[] = []
+
       for (const planFile of planFilesFull) {
-        if (!fileMap.has(planFile.path)) {
-          console.log(`[coding] 补全缺失文件: ${planFile.path}`)
+        if (fileMap.has(planFile.path)) {
+          fullyGenerated.push(planFile.path)
+          continue
+        }
+
+        console.log(`[coding] LLM 未返回文件: ${planFile.path}, desc: ${planFile.changeDescription.slice(0, 60)}`)
+
+        if (isCriticalFile(planFile.changeDescription)) {
+          // Level 2: 关键文件缺失 → 绝对不兜底，标记为严重错误
+          criticalMissing.push(planFile.path)
+        } else if (isSafeToFallback(planFile.path, planFile.changeDescription)) {
+          // Level 1: 安全文件 → 用原始内容兜底，记录告警
           try {
-            // 兜底：读取沙箱里该文件的原始内容，至少保证文件存在
-            const { readFile } = await import('fs/promises')
             const originalContent = await readFile(join(sandbox.path, planFile.path), 'utf-8')
             fileMap.set(planFile.path, {
               path: planFile.path,
               content: originalContent,
-              summary: planFile.changeDescription,
+              summary: `[WARNING] LLM 未返回该文件变更，保留原始内容`,
             })
+            fallbackOriginal.push(planFile.path)
           } catch {
-            // 文件不存在，创建空文件占位，绝对不能丢
+            // 兜底失败，创建空文件占位
             fileMap.set(planFile.path, {
               path: planFile.path,
               content: '',
               summary: planFile.changeDescription,
             })
+            fallbackOriginal.push(planFile.path + ' (empty)')
           }
+        } else {
+          // 可疑文件 → 保守策略：直接归为 criticalMissing，本轮失败重试
+          criticalMissing.push(planFile.path)
         }
       }
 
-      // 4. 最终结果：100% 等于 plan 文件数，一个都不能少
-      const validOutputs = Array.from(fileMap.values())
-      console.log(`[coding] 最终生成文件数: ${validOutputs.length}, plan 文件数: ${planFilesFull.length}`)
+      // ── 3. 生成文件校验摘要事件 ──
+      const fileValidationSummary: FileValidationSummary = {
+        totalPlanFiles: planFilesFull.length,
+        fullyGenerated,
+        fallbackOriginal,
+        noChangeDetected: [],
+        criticalMissing,
+      }
+      finalFileValidationSummary = fileValidationSummary
+      yield { type: 'file-validation', summary: fileValidationSummary }
 
-      // 5. 绝对不会出现 0 个有效文件的情况
+      // ── 4. 关键文件缺失 → 本轮直接失败，进入重试 ──
+      if (criticalMissing.length > 0) {
+        const err = `关键文件生成失败，LLM 未返回核心变更文件: ${criticalMissing.join(', ')}`
+        codeErrors.push(`第${codeAttempt}轮: ${err}`)
+        yield {
+          type: 'executing',
+          phase: `critical-missing: ${criticalMissing.length} 个关键文件未返回`,
+          progress: 52,
+          warnings: criticalMissing,
+        }
+
+        if (codeAttempt === MAX_RETRIES) {
+          const detailedError = `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`
+          yield { type: 'failed', requirement, error: detailedError, userMessage: `关键代码文件生成失败，AI 遗漏了核心变更文件：${criticalMissing.join(', ')}。请尝试重新描述需求，或简化需求范围后重试。` }
+          requirement.status = 'failed'
+          await requirementMemory.saveRequirement(requirement)
+          await requirementMemory.saveLesson({
+            id: crypto.randomUUID(),
+            projectId,
+            requirementId: requirement.id,
+            phase: 'coding',
+            filePath: null,
+            errorSummary: `关键文件缺失: ${criticalMissing.join(', ')}`,
+            errorDetail: detailedError,
+            fixHint: null,
+            resolved: false,
+            createdAt: new Date(),
+          })
+          return
+        }
+        continue
+      }
+
+      // ── 5. 有兜底文件 → 推送黄色告警事件 ──
+      if (fallbackOriginal.length > 0) {
+        yield {
+          type: 'executing',
+          phase: `warning: ${fallbackOriginal.length} 个文件保留原始内容`,
+          progress: 55,
+          warnings: fallbackOriginal,
+        }
+      }
+
+      // ── 6. 最终结果校验 ──
+      const validOutputs = Array.from(fileMap.values())
+      console.log(`[coding] 文件校验完成: 总plan=${planFilesFull.length}, 正常生成=${fullyGenerated.length}, 兜底=${fallbackOriginal.length}`)
+
       if (validOutputs.length === 0) {
         const err = '编码阶段未生成有效文件'
         codeErrors.push(`第${codeAttempt}轮: ${err}`)
@@ -460,6 +578,45 @@ export class Orchestrator {
         continue
       }
 
+      // ── 隐患7修复：先清理所有残留的 .orig 文件，避免旧备份污染本轮校验 ──
+      const { unlink, readdir } = await import('fs/promises')
+      try {
+        const walkDir = async (dir: string): Promise<string[]> => {
+          const results: string[] = []
+          const entries = await readdir(dir, { withFileTypes: true })
+          for (const e of entries) {
+            const fullPath = join(dir, e.name)
+            if (e.isDirectory()) {
+              results.push(...(await walkDir(fullPath)))
+            } else if (e.name.endsWith('.orig')) {
+              results.push(fullPath)
+            }
+          }
+          return results
+        }
+        const oldOrigFiles = await walkDir(sandbox.path)
+        for (const f of oldOrigFiles) {
+          await unlink(f).catch(() => {})
+        }
+        console.log(`[coding] 清理了 ${oldOrigFiles.length} 个残留的 .orig 文件`)
+      } catch {}
+
+      // ── 7. 写入前备份原始文件，用于后续 Diff 空变更检测 ──
+      yield { type: 'executing', phase: 'writing-files', progress: 60 }
+      for (const file of validOutputs) {
+        const fullPath = join(sandbox.path, file.path)
+        const origBackupPath = fullPath + '.orig'
+        try {
+          const exists = await readFile(fullPath, 'utf-8')
+          await writeFile(origBackupPath, exists, 'utf-8')
+        } catch {
+          // 原文件不存在，创建空备份
+          await mkdir(dirname(origBackupPath), { recursive: true })
+          await writeFile(origBackupPath, '', 'utf-8')
+        }
+      }
+
+      // ── 8. 写入所有文件 ──
       for (const file of validOutputs) {
         const fullPath = join(sandbox.path, file.path)
         if (file.content.trim().includes('__DELETE__')) {
@@ -474,6 +631,109 @@ export class Orchestrator {
           await writeFile(fullPath, file.content, 'utf-8')
           yield { type: 'executing', phase: `wrote: ${file.path}`, progress: 60 }
         }
+      }
+
+      // ── 9. Diff 空变更检测：检查每个计划修改的文件是否真的产生了变化 ──
+      yield { type: 'executing', phase: 'diff-validation', progress: 62 }
+      for (const file of validOutputs) {
+        const origBackupPath = join(sandbox.path, file.path + '.orig')
+        const newPath = join(sandbox.path, file.path)
+        try {
+          const originalContent = await readFile(origBackupPath, 'utf-8')
+          const newContent = await readFile(newPath, 'utf-8')
+          if (originalContent === newContent) {
+            fileValidationSummary.noChangeDetected.push(file.path)
+          }
+        } catch {
+          // 跳过无法读取的文件
+        }
+      }
+      finalFileValidationSummary = fileValidationSummary
+
+      // ── 10. 有空变更文件 → 本轮失败，进入重试 ──
+      if (fileValidationSummary.noChangeDetected.length > 0) {
+        const noChangeFiles = fileValidationSummary.noChangeDetected
+        const err = `计划修改但实际未产生任何变更的文件: ${noChangeFiles.join(', ')}`
+        codeErrors.push(`第${codeAttempt}轮: ${err}`)
+        yield {
+          type: 'executing',
+          phase: `no-change-detected: ${noChangeFiles.length} 个文件未产生变更`,
+          progress: 63,
+          warnings: noChangeFiles,
+        }
+
+        if (codeAttempt === MAX_RETRIES) {
+          const detailedError = `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`
+          yield { type: 'failed', requirement, error: detailedError, userMessage: `代码生成失败，以下文件计划修改但实际内容完全没有变化：${noChangeFiles.join(', ')}。请尝试重新描述需求后重试。` }
+          requirement.status = 'failed'
+          await requirementMemory.saveRequirement(requirement)
+          await requirementMemory.saveLesson({
+            id: crypto.randomUUID(),
+            projectId,
+            requirementId: requirement.id,
+            phase: 'coding',
+            filePath: null,
+            errorSummary: `空变更文件: ${noChangeFiles.join(', ')}`,
+            errorDetail: detailedError,
+            fixHint: null,
+            resolved: false,
+            createdAt: new Date(),
+          })
+          return
+        }
+        continue
+      }
+
+      // ── 隐患3修复：关键字存在性校验，防止"改了但没改到点子上"的情况 ──
+      const missingKeywords: string[] = []
+      const keywordsToCheck: string[] = []
+      const structuredDesc = requirement.structuredRequirement?.description ?? ''
+      const words = structuredDesc.split(/[\s,，。.]+/).filter(w => w.length >= 3)
+      keywordsToCheck.push(...words.slice(0, 5))
+
+      for (const kw of keywordsToCheck) {
+        let found = false
+        for (const file of validOutputs) {
+          if (file.content.includes(kw)) {
+            found = true
+            break
+          }
+        }
+        if (!found && kw.length >= 3) {
+          missingKeywords.push(kw)
+        }
+      }
+
+      if (missingKeywords.length >= 2) {
+        const err = `关键需求关键字未出现在生成代码中: ${missingKeywords.join(', ')}`
+        codeErrors.push(`第${codeAttempt}轮: ${err}`)
+        yield {
+          type: 'executing',
+          phase: `keyword-missing: 关键需求关键字未找到`,
+          progress: 65,
+          warnings: missingKeywords,
+        }
+
+        if (codeAttempt === MAX_RETRIES) {
+          const detailedError = `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`
+          yield { type: 'failed', requirement, error: detailedError, userMessage: `代码生成失败，以下需求关键字未出现在生成的代码中：${missingKeywords.join(', ')}。请尝试重新描述需求后重试。` }
+          requirement.status = 'failed'
+          await requirementMemory.saveRequirement(requirement)
+          await requirementMemory.saveLesson({
+            id: crypto.randomUUID(),
+            projectId,
+            requirementId: requirement.id,
+            phase: 'coding',
+            filePath: null,
+            errorSummary: `关键字缺失: ${missingKeywords.join(', ')}`,
+            errorDetail: detailedError,
+            fixHint: null,
+            resolved: false,
+            createdAt: new Date(),
+          })
+          return
+        }
+        continue
       }
 
       // 保存本轮输出，供下轮重试参考
@@ -620,6 +880,7 @@ export class Orchestrator {
       screenshot: screenshot ?? undefined,
       files: validOutputs.map(f => ({ path: f.path, summary: f.summary })),
       diffCheck: diffCheckResult,
+      fileValidationSummary: finalFileValidationSummary ?? undefined,
     }
     return
   }

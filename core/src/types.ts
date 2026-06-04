@@ -8,6 +8,7 @@ export type RequirementStatus =
   | 'idle'
   | 'clarifying'
   | 'clarified'
+  | 'needs-confirmation'
   | 'planning'
   | 'plan-ready'
   | 'plan-approved'
@@ -318,9 +319,18 @@ export type OrchestratorEvent =
   | { type: 'status-change'; status: RequirementStatus; agent: string }
   | { type: 'waiting-for-pm'; requirement: Requirement; questions: string[] }
   | { type: 'plan-ready'; plan: FilePlan[]; requirement: Requirement; riskAssessment?: RiskAssessment; naturalSummary?: NaturalLanguageSummary }
-  | { type: 'diff-ready'; requirement: Requirement; diff: string; screenshot?: string; files: { path: string; summary: string }[]; diffCheck?: DiffCheckResult }
-  | { type: 'executing'; phase: string; progress: number }
+  | { type: 'diff-ready'; requirement: Requirement; diff: string; screenshot?: string; files: { path: string; summary: string }[]; diffCheck?: DiffCheckResult; fileValidationSummary?: FileValidationSummary }
+  | { type: 'executing'; phase: string; progress: number; warnings?: string[] }
   | { type: 'test-result'; passed: boolean; details: string }
   | { type: 'completed'; requirement: Requirement; prUrl?: string; sandboxPath?: string }
   | { type: 'failed'; requirement: Requirement; error: string; userMessage?: string }
   | { type: 'risk-assessed'; requirement: Requirement; assessment: RiskAssessment }
+  | { type: 'file-validation'; summary: FileValidationSummary }
+
+export interface FileValidationSummary {
+  totalPlanFiles: number
+  fullyGenerated: string[]
+  fallbackOriginal: string[]
+  noChangeDetected: string[]
+  criticalMissing: string[]
+}

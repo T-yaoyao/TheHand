@@ -1,5 +1,5 @@
 import { z } from 'zod';
-export type RequirementStatus = 'idle' | 'clarifying' | 'clarified' | 'planning' | 'plan-ready' | 'plan-approved' | 'plan-rejected' | 'coding' | 'testing' | 'diff-ready' | 'done' | 'failed' | 'reverted';
+export type RequirementStatus = 'idle' | 'clarifying' | 'clarified' | 'needs-confirmation' | 'planning' | 'plan-ready' | 'plan-approved' | 'plan-rejected' | 'coding' | 'testing' | 'diff-ready' | 'done' | 'failed' | 'reverted';
 export interface Requirement {
     id: string;
     status: RequirementStatus;
@@ -247,10 +247,12 @@ export type OrchestratorEvent = {
         summary: string;
     }[];
     diffCheck?: DiffCheckResult;
+    fileValidationSummary?: FileValidationSummary;
 } | {
     type: 'executing';
     phase: string;
     progress: number;
+    warnings?: string[];
 } | {
     type: 'test-result';
     passed: boolean;
@@ -269,5 +271,15 @@ export type OrchestratorEvent = {
     type: 'risk-assessed';
     requirement: Requirement;
     assessment: RiskAssessment;
+} | {
+    type: 'file-validation';
+    summary: FileValidationSummary;
 };
+export interface FileValidationSummary {
+    totalPlanFiles: number;
+    fullyGenerated: string[];
+    fallbackOriginal: string[];
+    noChangeDetected: string[];
+    criticalMissing: string[];
+}
 //# sourceMappingURL=types.d.ts.map

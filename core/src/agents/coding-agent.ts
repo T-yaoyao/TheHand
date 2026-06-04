@@ -178,20 +178,15 @@ function parseCodingBatchResponse(response: string, plan: FilePlan[]): CodeFileO
   tryExtractByBracket('[', ']')
   tryExtractByBracket('{', '}')
 
-  // 3. 兜底：如果提取到的文件数 < plan 数，自动补全缺失的文件
-  if (results.length < plan.length) {
-    const existingPaths = new Set(results.map(f => f.path))
-    for (const p of plan) {
-      if (!existingPaths.has(p.path)) {
-        results.push({
-          path: p.path,
-          content: '',
-          summary: p.changeDescription,
-        })
-      }
-    }
+  // 3. 输出完整性校验：有效JSON占比低于30%直接判定解析失败
+  const totalResponseChars = response?.trim().length ?? 0
+  const totalExtractedChars = results.reduce((sum, f) => sum + f.content.length, 0)
+  if (totalResponseChars > 0 && totalExtractedChars / totalResponseChars < 0.3) {
+    console.warn(`[coding] 输出完整性校验失败: 有效内容占比仅 ${Math.round((totalExtractedChars / totalResponseChars) * 100)}%`)
+    return []
   }
 
+  // 4. 解析器层绝对不自动补空文件！所有缺失文件的处理逻辑100%集中到上层审计层
   if (results.length === 0) {
     console.error(`[coding] batch parse failed, response first 300 chars: ${response?.slice(0, 300)}`)
   }

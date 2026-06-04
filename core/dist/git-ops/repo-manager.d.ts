@@ -7,6 +7,7 @@ export interface CleanCheckResult {
 export interface DiffCheckResult {
     hasUnexpectedChanges: boolean;
     unexpectedFiles?: string[];
+    missingPlannedFiles?: string[];
     changedFiles: string[];
     diffSummary: string;
 }
@@ -27,7 +28,7 @@ export declare class RepoManager {
      */
     cleanCheck(): Promise<CleanCheckResult>;
     /**
-     * Diff 检查：检测是否有预期外的文件变更
+     * Diff 检查：检测是否有预期外的文件变更，同时校验所有计划内文件都已变更
      */
     diffCheck(expectedFiles: string[]): Promise<DiffCheckResult>;
     /**
