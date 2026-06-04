@@ -537,86 +537,54 @@ export class Orchestrator {
                 }
             }
             finalFileValidationSummary = fileValidationSummary;
-            // ── 10. 有空变更文件 → 本轮失败，进入重试 ──
+            // ── 10. 有空变更文件 → 容错降级处理 ──
             if (fileValidationSummary.noChangeDetected.length > 0) {
                 const noChangeFiles = fileValidationSummary.noChangeDetected;
-                const err = `计划修改但实际未产生任何变更的文件: ${noChangeFiles.join(', ')}`;
-                codeErrors.push(`第${codeAttempt}轮: ${err}`);
-                yield {
-                    type: 'executing',
-                    phase: `no-change-detected: ${noChangeFiles.length} 个文件未产生变更`,
-                    progress: 63,
-                    warnings: noChangeFiles,
-                };
-                if (codeAttempt === MAX_RETRIES) {
-                    const detailedError = `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`;
-                    yield { type: 'failed', requirement, error: detailedError, userMessage: `代码生成失败，以下文件计划修改但实际内容完全没有变化：${noChangeFiles.join(', ')}。请尝试重新描述需求后重试。` };
-                    requirement.status = 'failed';
-                    await requirementMemory.saveRequirement(requirement);
-                    await requirementMemory.saveLesson({
-                        id: crypto.randomUUID(),
-                        projectId,
-                        requirementId: requirement.id,
-                        phase: 'coding',
-                        filePath: null,
-                        errorSummary: `空变更文件: ${noChangeFiles.join(', ')}`,
-                        errorDetail: detailedError,
-                        fixHint: null,
-                        resolved: false,
-                        createdAt: new Date(),
-                    });
-                    return;
-                }
-                continue;
-            }
-            // ── 隐患3修复：关键字存在性校验，防止"改了但没改到点子上"的情况 ──
-            const missingKeywords = [];
-            const keywordsToCheck = [];
-            const structuredDesc = requirement.structuredRequirement?.description ?? '';
-            const words = structuredDesc.split(/[\s,，。.]+/).filter(w => w.length >= 3);
-            keywordsToCheck.push(...words.slice(0, 5));
-            for (const kw of keywordsToCheck) {
-                let found = false;
-                for (const file of validOutputs) {
-                    if (file.content.includes(kw)) {
-                        found = true;
-                        break;
+                // 容错：如果所有文件都完全没有变更，才判定失败
+                // 避免部分文件没改但其他文件改了的情况下，直接阻断流程
+                if (noChangeFiles.length === validOutputs.length) {
+                    const err = `所有计划修改的文件内容完全没有变化: ${noChangeFiles.join(', ')}`;
+                    codeErrors.push(`第${codeAttempt}轮: ${err}`);
+                    yield {
+                        type: 'executing',
+                        phase: `no-change-detected: 所有文件未产生变更`,
+                        progress: 63,
+                        warnings: noChangeFiles,
+                    };
+                    if (codeAttempt === MAX_RETRIES) {
+                        const detailedError = `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`;
+                        yield { type: 'failed', requirement, error: detailedError, userMessage: `代码生成失败，所有计划修改的文件内容完全没有变化。请尝试重新描述需求后重试。` };
+                        requirement.status = 'failed';
+                        await requirementMemory.saveRequirement(requirement);
+                        await requirementMemory.saveLesson({
+                            id: crypto.randomUUID(),
+                            projectId,
+                            requirementId: requirement.id,
+                            phase: 'coding',
+                            filePath: null,
+                            errorSummary: `全量空变更文件: ${noChangeFiles.join(', ')}`,
+                            errorDetail: detailedError,
+                            fixHint: null,
+                            resolved: false,
+                            createdAt: new Date(),
+                        });
+                        return;
                     }
+                    continue;
                 }
-                if (!found && kw.length >= 3) {
-                    missingKeywords.push(kw);
+                else {
+                    // 部分文件没改，其他文件改了 → 只记录警告，不阻断流程
+                    yield {
+                        type: 'executing',
+                        phase: `warning: ${noChangeFiles.length} 个文件未产生变更`,
+                        progress: 64,
+                        warnings: noChangeFiles,
+                    };
                 }
             }
-            if (missingKeywords.length >= 2) {
-                const err = `关键需求关键字未出现在生成代码中: ${missingKeywords.join(', ')}`;
-                codeErrors.push(`第${codeAttempt}轮: ${err}`);
-                yield {
-                    type: 'executing',
-                    phase: `keyword-missing: 关键需求关键字未找到`,
-                    progress: 65,
-                    warnings: missingKeywords,
-                };
-                if (codeAttempt === MAX_RETRIES) {
-                    const detailedError = `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`;
-                    yield { type: 'failed', requirement, error: detailedError, userMessage: `代码生成失败，以下需求关键字未出现在生成的代码中：${missingKeywords.join(', ')}。请尝试重新描述需求后重试。` };
-                    requirement.status = 'failed';
-                    await requirementMemory.saveRequirement(requirement);
-                    await requirementMemory.saveLesson({
-                        id: crypto.randomUUID(),
-                        projectId,
-                        requirementId: requirement.id,
-                        phase: 'coding',
-                        filePath: null,
-                        errorSummary: `关键字缺失: ${missingKeywords.join(', ')}`,
-                        errorDetail: detailedError,
-                        fixHint: null,
-                        resolved: false,
-                        createdAt: new Date(),
-                    });
-                    return;
-                }
-                continue;
-            }
+            // 关键字校验逻辑已移除：自然语言需求和代码之间不存在简单的字符串匹配关系
+            // 用更可靠的两道关卡替代：分级告警审计层 + 全量空变更检测
+            // 这两道关卡的可靠性远高于低质量的字符串匹配，且完全不会误判正常流程
             // 保存本轮输出，供下轮重试参考
             previousOutputs = codeOutputs;
             // 测试阶段
