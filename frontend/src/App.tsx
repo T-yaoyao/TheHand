@@ -36,6 +36,9 @@ export function App() {
   const toastTimerRef = useRef<ReturnType<typeof setTimeout>>()
   selectedRef.current = selected
 
+  // 持久化 diff 数据：latestEvent 会被后续事件覆盖，需要单独存储
+  const [diffData, setDiffData] = useState<{ diff: string; files: { path: string; summary: string }[]; screenshot?: string } | null>(null)
+
   const { events, connected, latestEvent, clearEvents, reconnect } = useSSE(selected?.id ?? null)
 
   const showToast = useCallback((type: 'error' | 'success', msg: string) => {
@@ -76,6 +79,7 @@ export function App() {
     if (selected) {
       api.getConversations(selected.id).then(setConversations).catch(() => setConversations([]))
       clearEvents()
+      setDiffData(null)
       setTab('chat')
     }
   }, [selected?.id, clearEvents])
@@ -86,12 +90,22 @@ export function App() {
 
   useEffect(() => {
     if (!latestEvent || !selected) return
+    if (latestEvent.type === 'orchestrator-started') {
+      // 流水线启动，立即同步状态
+      setSelected(prev => prev && prev.id === latestEvent.requirementId ? { ...prev, status: 'clarifying' } : prev)
+      setRequirements(prev => prev.map(r => r.id === latestEvent.requirementId ? { ...r, status: 'clarifying' } : r))
+    }
     if (latestEvent.type === 'plan-ready') {
       setTab('plan')
       refreshList()
     }
     if (latestEvent.type === 'diff-ready') {
       setTab('diff')
+      setDiffData({
+        diff: latestEvent.diff ?? '',
+        files: latestEvent.files ?? [],
+        screenshot: latestEvent.screenshot,
+      })
       refreshList()
     }
     if (latestEvent.type === 'waiting-for-pm') {
@@ -111,6 +125,7 @@ export function App() {
     if (latestEvent.type === 'completed' || latestEvent.type === 'failed') {
       refreshList()
       setThinking(false)
+      setTab('progress')
     }
   }, [latestEvent, selected?.id, refreshList])
 
@@ -155,6 +170,9 @@ export function App() {
     try {
       setTab('progress')
       await api.runOrchestrator(id)
+      // 立即更新本地状态，不等 SSE 事件
+      setSelected(prev => prev && prev.id === id ? { ...prev, status: 'clarifying' } : prev)
+      setRequirements(prev => prev.map(r => r.id === id ? { ...r, status: 'clarifying' } : r))
       showToast('success', '流水线已启动')
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : '触发失败')
@@ -413,6 +431,7 @@ export function App() {
                           await api.approvePlan(selected.id)
                           showToast('success', '方案已确认，开始编码')
                           refreshList()
+                          setTab('progress')
                         } catch (e: unknown) {
                           showToast('error', e instanceof Error ? e.message : '确认失败')
                           setThinking(false)
@@ -443,25 +462,25 @@ export function App() {
 
               {tab === 'diff' && (
                 <div className="diff-panel">
-                  {latestEvent?.type === 'diff-ready' && latestEvent.diff ? (
+                  {diffData ? (
                     <>
                       <div className="diff-header">
                         <h3>代码变更预览</h3>
                         <p>以下文件将被修改，请确认后提交或撤回。</p>
-                        {latestEvent.files && (
+                        {diffData.files && (
                           <ul className="diff-file-list">
-                            {latestEvent.files.map((f) => (
+                            {diffData.files.map((f) => (
                               <li key={f.path}><code>{f.path}</code> — {f.summary}</li>
                             ))}
                           </ul>
                         )}
                       </div>
-                      {latestEvent.screenshot ? (
+                      {diffData.screenshot ? (
                         <div className="screenshot-preview">
-                          <img src={`data:image/png;base64,${latestEvent.screenshot}`} alt="页面预览" />
+                          <img src={`data:image/png;base64,${diffData.screenshot}`} alt="页面预览" />
                         </div>
                       ) : (
-                        <pre className="diff-content"><code>{latestEvent.diff}</code></pre>
+                        <pre className="diff-content"><code>{diffData.diff}</code></pre>
                       )}
                       <div className="plan-actions">
                         <button type="button" className="btn-primary" onClick={async () => {
@@ -471,6 +490,7 @@ export function App() {
                             await api.commitChanges(selected.id)
                             showToast('success', '代码已提交，正在应用到源仓库')
                             refreshList()
+                            setTab('progress')
                           } catch (e: unknown) {
                             showToast('error', e instanceof Error ? e.message : '提交失败')
                             setThinking(false)

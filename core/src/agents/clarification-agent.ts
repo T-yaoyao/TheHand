@@ -1,5 +1,5 @@
 import type { AgentDefinition, AgentContext, StructuredRequirement } from '../types.js'
-import type { LLMClient } from '../llm/llm-client.js'
+import type { LLMClient, ToolDefinition, Message } from '../llm/llm-client.js'
 import type { PromptManager } from '../llm/prompt-manager.js'
 
 export interface ClarificationResult {
@@ -8,6 +8,73 @@ export interface ClarificationResult {
   questions: string[] | null
   round: number
 }
+
+/**
+ * 澄清 Agent Function Calling 工具定义
+ */
+export const CLARIFICATION_TOOLS: ToolDefinition[] = [
+  {
+    type: 'function' as const,
+    function: {
+      name: 'submit_requirement',
+      description: '当需求信息足够完整时，提交结构化需求。调用后澄清阶段结束。',
+      parameters: {
+        type: 'object',
+        properties: {
+          type: {
+            type: 'string',
+            enum: ['add_display', 'add_page', 'add_field', 'modify_api', 'add_feature', 'delete_page', 'delete_field'],
+            description: '需求类型',
+          },
+          entity: {
+            type: 'string',
+            description: '目标实体',
+          },
+          fields: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: '字段名' },
+                type: { type: 'string', description: '字段类型' },
+                description: { type: 'string', description: '字段说明' },
+              },
+              required: ['name', 'type', 'description'],
+            },
+          },
+          scope: {
+            type: 'string',
+            enum: ['frontend', 'backend', 'fullstack'],
+            description: '影响范围',
+          },
+          description: {
+            type: 'string',
+            description: '需求详细描述',
+          },
+        },
+        required: ['type', 'entity', 'scope', 'description'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'ask_for_clarification',
+      description: '当需求信息不完整时，向 PM 追问。每轮最多 2-3 个问题。',
+      parameters: {
+        type: 'object',
+        properties: {
+          questions: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '追问问题列表',
+          },
+        },
+        required: ['questions'],
+      },
+    },
+  },
+]
 
 /**
  * 澄清 Agent：识别模糊需求中的歧义，主动追问，输出结构化需求 JSON
@@ -25,7 +92,7 @@ export function createClarificationAgent(): AgentDefinition {
 
 /**
  * 澄清 Agent 的实际执行逻辑
- * 不走 tool-use 循环，直接调 LLM 解析 JSON
+ * Function Calling 优先路径，保留旧解析作为 fallback
  */
 export async function runClarification(
   llmClient: LLMClient,
@@ -61,29 +128,62 @@ export async function runClarification(
     userMessage += historyLines.join('\n')
   }
 
-  // 如果有项目上下文，注入模型信息
+  // 注入项目模型定义，让 LLM 知道有哪些实体和字段
   if (projectContext?.models) {
     userMessage += `\n\n项目模型定义：\n${JSON.stringify(projectContext.models, null, 2)}`
   }
 
-  // 第 3 轮 = 最后一轮：强制输出结构化 JSON，不再追问
+  // 第 3 轮 = 最后一轮：强制输出结构化需求，不再追问
   if (round >= 3) {
-    userMessage += `\n\n## 注意：这是第 ${round} 轮澄清（最后一轮）。你必须直接输出结构化需求 JSON，不能再追问。如果信息不完整，用合理默认值填充。`
+    userMessage += `\n\n## 注意：这是第 ${round} 轮澄清（最后一轮）。你必须调用 submit_requirement 提交结构化需求，不能再追问。如果信息不完整，用合理默认值填充。`
   }
 
-  // 调用 LLM
-  const response = await llmClient.simpleChat(systemPrompt, userMessage)
+  // ── Function Calling 优先路径 ──
+  const messages: Message[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userMessage },
+  ]
 
-  // 解析 JSON 响应
-  const result = parseClarificationResponse(response, round)
+  const response = await llmClient.chat(messages, {
+    tools: CLARIFICATION_TOOLS,
+    agent: 'clarification',
+  })
 
-  return result
+  // 优先从 toolCalls 直接取结果
+  if (response.toolCalls && response.toolCalls.length > 0) {
+    const tc = response.toolCalls[0]
+
+    if (tc.name === 'submit_requirement' && tc.arguments) {
+      console.log('[clarification] 使用 function calling: submit_requirement')
+      const req = tc.arguments as StructuredRequirement
+      return {
+        requirement: req,
+        needsMoreInfo: false,
+        questions: null,
+        round,
+      }
+    }
+
+    if (tc.name === 'ask_for_clarification' && tc.arguments?.questions) {
+      console.log('[clarification] 使用 function calling: ask_for_clarification')
+      return {
+        requirement: currentRequirement ?? currentOrDefault(''),
+        needsMoreInfo: true,
+        questions: tc.arguments.questions as string[],
+        round,
+      }
+    }
+  }
+
+  // ── Fallback：旧的解析逻辑兜底（LLM 偶尔不调 tool 的极端情况） ──
+  console.log('[clarification] function calling 未命中，使用 fallback 解析')
+  return parseClarificationResponse(response.content, round, currentRequirement)
 }
 
 /**
- * 解析 LLM 返回的澄清结果
+ * 解析 LLM 返回的澄清结果（fallback 路径）
  */
-function parseClarificationResponse(response: string, round: number): ClarificationResult {
+function parseClarificationResponse(response: string, round: number, currentRequirement?: StructuredRequirement | null): ClarificationResult {
   // 尝试直接解析
   let json: any = null
   try {
@@ -123,7 +223,7 @@ function parseClarificationResponse(response: string, round: number): Clarificat
 
   // 如果 LLM 返回的是追问问题（不是 JSON）
   return {
-    requirement: currentOrDefault(response),
+    requirement: currentRequirement ?? currentOrDefault(response),
     needsMoreInfo: true,
     questions: extractQuestions(response),
     round,

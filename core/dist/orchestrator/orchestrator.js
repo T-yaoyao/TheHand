@@ -606,11 +606,27 @@ export class Orchestrator {
                 }
                 break;
             }
-            const testErrors = testResult.steps
+            // ── 构建增强版 testError：完整错误 + 错误相关文件内容 ──
+            const errorOutput = testResult.steps
                 .filter(s => !s.passed)
-                .map(s => `${s.name}: ${s.output.slice(0, 500)}`)
+                .map(s => `${s.name}: ${s.output}`) // 不截断，保留完整错误
                 .join('\n---\n');
-            codeErrors.push(`第${codeAttempt}轮测试失败:\n${testErrors}`);
+            // 从错误中提取涉及的源码文件路径，读取其内容作为上下文
+            const errorFileContents = await extractAndReadErrorFiles(errorOutput, sandbox.path);
+            if (errorFileContents.length > 0) {
+                yield {
+                    type: 'executing',
+                    phase: `reading ${errorFileContents.length} error-related files for context`,
+                    progress: 64,
+                };
+            }
+            // 将完整错误 + 文件内容一起存入 codeErrors，供下轮重试使用
+            let enhancedError = `第${codeAttempt}轮测试失败:\n${errorOutput.slice(0, 2000)}`;
+            if (errorFileContents.length > 0) {
+                enhancedError += '\n\n## 错误涉及的源码文件（请重点检查这些文件的 import/export 是否正确）\n' +
+                    errorFileContents.map(f => `### ${f.path}\n\`\`\`\n${f.content}\n\`\`\``).join('\n\n');
+            }
+            codeErrors.push(enhancedError);
             if (executor) {
                 await executor('git checkout . && git clean -fd', { timeout: 30_000 }).catch(() => { });
             }
@@ -813,5 +829,75 @@ export class Orchestrator {
         };
         return mapping[status] ?? 'unknown';
     }
+}
+/**
+ * 从构建/测试错误输出中提取涉及的源码文件路径，并读取其内容
+ * 只提取项目源码文件，排除 node_modules、工具内部文件、堆栈帧
+ * 返回 {path, content}[] 供 coding agent 作为上下文参考
+ */
+async function extractAndReadErrorFiles(errorOutput, sandboxPath) {
+    const filePaths = new Set();
+    // 只匹配项目源码路径（src/ 或 app/ 开头），不匹配堆栈帧中的绝对路径
+    const patterns = [
+        // Vite/Rollup 错误行: "src/agent.js (2:9): "getToken" is not exported..."
+        /(?:^|\n)\s*((?:src|app|lib)\/[^\s(]+\.(?:js|jsx|ts|tsx|vue))\s*\(\d+:\d+\):/g,
+        // TypeScript 错误: src/foo.ts(10,5): error TS2322
+        /(?:^|\n)\s*((?:src|app|lib)\/[^\s(]+\.(?:js|jsx|ts|tsx|vue))\(\d+,\d+\):\s*error/g,
+        // ESLint 错误: src/foo.js:10:5: error
+        /(?:^|\n)\s*((?:src|app|lib)\/[^\s:]+\.(?:js|jsx|ts|tsx|vue)):\d+:\d+:\s*(?:error|warning)/g,
+        // file: 行中的项目源码路径（从 /sandbox/<workspace>/ 之后截取）
+        /file:\s*\/sandbox\/[^/]+\/((?:src|app|lib)\/[^\s:]+\.(?:js|jsx|ts|tsx|vue))/g,
+        // 错误信息中引用的文件: "xxx" is not exported by "src/context/AuthContext.jsx"
+        /(?:is not exported by|is not declared in|Cannot find module|Module not found)[^"']*["']((?:src|app|lib)\/[^"']+\.(?:js|jsx|ts|tsx|vue))["']/gi,
+        // 错误信息中引用的文件: imported by "src/agent.js"
+        /imported by\s+["']((?:src|app|lib)\/[^"']+\.(?:js|jsx|ts|tsx|vue))["']/gi,
+        // 绝对路径中的项目源码: /sandbox/frontend/src/context/AuthContext.jsx:46:9
+        /(?:^|\s)\/sandbox\/[^/]+\/((?:src|app|lib)\/[^\s:]+\.(?:js|jsx|ts|tsx|vue)):\d+/g,
+    ];
+    // 排除规则：node_modules、工具内部路径
+    const EXCLUDE_PATTERNS = [
+        /node_modules[\\/]/,
+        /rollup[\\/]dist[\\/]/,
+        /vite[\\/]dist[\\/]/,
+        /parseAst\.js$/,
+        /node-entry\.js$/,
+    ];
+    function isExcluded(path) {
+        return EXCLUDE_PATTERNS.some(p => p.test(path));
+    }
+    for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.exec(errorOutput)) !== null) {
+            const filePath = match[1].replace(/^\//, '');
+            if (isExcluded(filePath))
+                continue;
+            // normalize：frontend/src/agent.js → src/agent.js
+            const normalized = filePath.replace(/^(?:frontend|backend)\//, '');
+            filePaths.add(normalized);
+        }
+    }
+    // 读取每个文件的内容
+    const { readFile } = await import('fs/promises');
+    const { join } = await import('path');
+    const results = [];
+    for (const filePath of filePaths) {
+        // 尝试多个可能的基础路径
+        const candidates = [
+            join(sandboxPath, 'frontend', filePath),
+            join(sandboxPath, 'backend', filePath),
+            join(sandboxPath, filePath),
+        ];
+        for (const fullPath of candidates) {
+            try {
+                const content = await readFile(fullPath, 'utf-8');
+                results.push({ path: filePath, content });
+                break;
+            }
+            catch {
+                // 文件不存在，尝试下一个候选路径
+            }
+        }
+    }
+    return results;
 }
 //# sourceMappingURL=orchestrator.js.map

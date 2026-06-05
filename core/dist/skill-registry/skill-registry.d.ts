@@ -34,6 +34,7 @@ export declare class SkillRegistry {
     /**
      * 从 skill body 构建执行器
      * 将 skill prompt 作为 system prompt，让 LLM 根据需求生成代码
+     * Function Calling 优先路径，复用 CODING_TOOLS
      */
     private buildExecutor;
     /**

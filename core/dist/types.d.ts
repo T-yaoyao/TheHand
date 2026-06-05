@@ -35,6 +35,7 @@ export interface FilePlan {
     changeDescription: string;
     priority: number;
 }
+import type { ToolDefinition } from './llm/llm-client.js';
 export interface AgentDefinition {
     name: string;
     description: string;
@@ -42,6 +43,7 @@ export interface AgentDefinition {
     tools: string[];
     model?: string;
     maxRounds?: number;
+    outputTool?: ToolDefinition;
 }
 export interface AgentContext {
     requirement: Requirement;

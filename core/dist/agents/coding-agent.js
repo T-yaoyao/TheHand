@@ -1,6 +1,36 @@
 import { readFile, readdir } from 'fs/promises';
 import { join, resolve } from 'path';
 /**
+ * 编码 Agent Function Calling 工具定义
+ */
+export const CODING_TOOLS = [
+    {
+        type: 'function',
+        function: {
+            name: 'submit_files',
+            description: '提交所有需要修改的文件。一次性输出全部文件，不要分批。',
+            parameters: {
+                type: 'object',
+                properties: {
+                    files: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                path: { type: 'string', description: '相对于项目根目录的文件路径' },
+                                content: { type: 'string', description: '文件完整源码，删除的文件填 __DELETE__' },
+                                summary: { type: 'string', description: '一句话描述本次改动' },
+                            },
+                            required: ['path', 'content', 'summary'],
+                        },
+                    },
+                },
+                required: ['files'],
+            },
+        },
+    },
+];
+/**
  * 编码 Agent 定义（供 AgentRunner 等场景使用）
  */
 export function createCodingAgent() {
@@ -54,7 +84,12 @@ export async function runCoding(llmClient, promptManager, plan, sandboxPath, pro
     // 构建错误反馈（重试时）
     let errorHint = '';
     if (testError) {
-        errorHint = `\n\n## 上轮测试失败\n${testError}\n请分析错误原因并修正代码。`;
+        errorHint = `\n\n## 上轮测试失败\n${testError}
+
+请分析错误根因并修正代码。修复规则：
+1. 如果错误是 "xxx is not exported by yyy"，必须在 yyy 文件中**定义** xxx（函数/变量），然后导出。仅添加 export 语句不够。
+2. 如果错误涉及方案外的文件，请将修复后的文件完整内容一并输出。
+3. 修复 import 错误时，确保导入的函数/变量在源文件中有完整的定义和导出。`;
     }
     if (previousOutputs && previousOutputs.length > 0) {
         errorHint += '\n\n## 上轮生成的代码（仅供参考，请修正错误后重新生成）\n' +
@@ -72,8 +107,26 @@ ${fileContexts.join('\n\n')}
 ${contextHint}${constraintsHint}${errorHint}
 
 请输出所有文件的修改结果，JSON 数组格式。`;
-    const response = await llmClient.simpleChat(systemPrompt, userMessage, 'coding');
-    return parseCodingBatchResponse(response, plan);
+    // Function Calling 优先路径
+    const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userMessage },
+    ];
+    const response = await llmClient.chat(messages, {
+        tools: CODING_TOOLS,
+        agent: 'coding',
+    });
+    // 优先从 toolCalls 直接取结果
+    if (response.toolCalls && response.toolCalls.length > 0) {
+        const tc = response.toolCalls[0];
+        if (tc.name === 'submit_files' && tc.arguments.files) {
+            console.log('[coding] 使用 function calling 直接返回文件列表');
+            return tc.arguments.files;
+        }
+    }
+    // Fallback：旧的解析逻辑兜底
+    console.log('[coding] function calling 未命中，使用 fallback 解析');
+    return parseCodingBatchResponse(response.content, plan);
 }
 /**
  * 解析批量编码结果：JSON 数组
@@ -234,7 +287,8 @@ async function readContextFiles(sandboxPath) {
     return contextFiles;
 }
 /**
- * 解析单文件编码结果（兼容旧接口）
+ * 解析单文件编码结果（兼容旧接口，已 deprecated）
+ * @deprecated 请使用 Function Calling 批量获取文件
  */
 export function parseCodingFileResponse(response, expectedPath, defaultSummary) {
     if (!response?.trim())

@@ -32,27 +32,42 @@ export class AgentRunner {
         const maxRounds = agent.maxRounds ?? 10;
         let finalOutput = null;
         // 构建 tool definitions（如果有工具）
-        const toolDefs = tools.length > 0
-            ? tools.map(t => ({
+        const toolDefs = [];
+        if (tools.length > 0) {
+            toolDefs.push(...tools.map(t => ({
                 type: 'function',
                 function: {
                     name: t.name,
                     description: t.description,
                     parameters: this.zodToJsonSchema(t.inputSchema),
                 },
-            }))
-            : undefined;
+            })));
+        }
+        // 合并 outputTool 到 tools 列表
+        if (agent.outputTool) {
+            toolDefs.push(agent.outputTool);
+        }
+        const finalToolDefs = toolDefs.length > 0 ? toolDefs : undefined;
         while (rounds < maxRounds) {
             rounds++;
             const response = await this.llmClient.chat(messages, {
-                tools: toolDefs,
+                tools: finalToolDefs,
                 agent: agent.name,
             });
             totalInputTokens += response.usage.inputTokens;
             totalOutputTokens += response.usage.outputTokens;
             console.log(`[agent:${agent.name}] round=${rounds} hasToolCalls=${!!response.toolCalls} contentLen=${response.content?.length ?? 0}`);
-            // 如果有 tool_calls，执行工具并继续循环
+            // 如果有 tool_calls
             if (response.toolCalls && response.toolCalls.length > 0) {
+                // 优先检查是否是 outputTool 调用，如果是直接返回结果
+                if (agent.outputTool) {
+                    const outputTc = response.toolCalls.find(tc => tc.name === agent.outputTool.function.name);
+                    if (outputTc) {
+                        console.log(`[agent:${agent.name}] 使用 outputTool function calling 直接返回结果`);
+                        finalOutput = outputTc.arguments;
+                        break;
+                    }
+                }
                 // 将 assistant 消息加入历史
                 messages.push({
                     role: 'assistant',
@@ -93,7 +108,8 @@ export class AgentRunner {
                 }
                 continue;
             }
-            // 没有 tool_calls，解析 content 中的 JSON 作为输出
+            // 没有 tool_calls，解析 content 中的 JSON 作为输出（纯 fallback 路径）
+            console.log(`[agent:${agent.name}] function calling 未命中，使用 parseOutput fallback`);
             finalOutput = this.parseOutput(response.content);
             break;
         }

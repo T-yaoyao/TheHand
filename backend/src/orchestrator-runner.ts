@@ -94,6 +94,17 @@ export async function runOrchestratorForRequirement(
 
   runningJobs.add(requirementId)
   const startedAt = Date.now()
+  const previousStatus = requirement.status
+
+  // ── 重跑时重置状态：failed/done → clarifying ──
+  if (previousStatus === 'failed' || previousStatus === 'done') {
+    requirement.status = 'clarifying'
+    execute(
+      `UPDATE requirements SET status = 'clarifying', updated_at = datetime('now') WHERE id = ?`,
+      [requirementId],
+    )
+    log.info(`[orchestrator] 重置状态: failed/done → clarifying`)
+  }
 
   log.info(`[orchestrator] 开始 id=${requirementId.slice(0, 8)}… project=${projectId}`)
   log.info(`[orchestrator] PM: ${requirement.pmInput.slice(0, 80)}${requirement.pmInput.length > 80 ? '…' : ''}`)
@@ -102,6 +113,13 @@ export async function runOrchestratorForRequirement(
     type: 'orchestrator-started',
     requirementId,
     projectId,
+  })
+
+  // 立即推送状态变更事件，让前端同步
+  pushEvent(requirementId, {
+    type: 'status-change',
+    status: 'clarifying',
+    agent: 'orchestrator-runner',
   })
 
   let eventCount = 0

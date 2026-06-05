@@ -63,6 +63,8 @@ export interface FilePlan {
 // Agent 相关
 // ============================================================
 
+import type { ToolDefinition } from './llm/llm-client.js'
+
 export interface AgentDefinition {
   name: string
   description: string
@@ -70,6 +72,7 @@ export interface AgentDefinition {
   tools: string[]
   model?: string
   maxRounds?: number
+  outputTool?: ToolDefinition  // 结构化输出 Function Calling 工具定义
 }
 
 export interface AgentContext {

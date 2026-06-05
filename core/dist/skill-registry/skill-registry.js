@@ -1,5 +1,6 @@
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
+import { CODING_TOOLS } from '../agents/coding-agent.js';
 /**
  * Skill 注册与发现机制
  * 对标 Claude Code 的 getSkillDirCommands() + createSkillCommand()
@@ -75,6 +76,7 @@ export class SkillRegistry {
     /**
      * 从 skill body 构建执行器
      * 将 skill prompt 作为 system prompt，让 LLM 根据需求生成代码
+     * Function Calling 优先路径，复用 CODING_TOOLS
      */
     buildExecutor(prompt) {
         return async (requirement, projectContext) => {
@@ -89,22 +91,27 @@ ${prompt}
 规则：
 1. 输出每个文件的完整内容（不是 diff）
 2. 保持原有代码风格
-3. 只修改必要的内容
-4. 必须输出 JSON 数组，每个元素包含 path、content、summary 三个字段
-5. path 是相对于项目根目录的文件路径
-
-输出格式（严格 JSON 数组）：
-[
-  {
-    "path": "server/models/Article.js",
-    "content": "完整的文件内容...",
-    "summary": "新增 readingTime 字段"
-  }
-]`;
+3. 只修改必要的内容`;
             const userMessage = `需求：\n${JSON.stringify(requirement, null, 2)}\n\n项目上下文：\n${JSON.stringify(projectContext, null, 2)}`;
-            const response = await this.llmClient.simpleChat(systemPrompt, userMessage);
-            // 解析 LLM 返回的文件列表
-            return this.parseSkillOutput(response);
+            const messages = [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userMessage },
+            ];
+            const response = await this.llmClient.chat(messages, {
+                tools: CODING_TOOLS,
+                agent: 'skill',
+            });
+            // 优先从 toolCalls 直接取结果
+            if (response.toolCalls && response.toolCalls.length > 0) {
+                const tc = response.toolCalls[0];
+                if (tc.name === 'submit_files' && tc.arguments.files) {
+                    console.log('[skill] 使用 function calling 直接返回文件列表');
+                    return tc.arguments.files;
+                }
+            }
+            // Fallback：旧的解析逻辑兜底
+            console.log('[skill] function calling 未命中，使用 fallback 解析');
+            return this.parseSkillOutput(response.content);
         };
     }
     /**

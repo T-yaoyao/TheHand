@@ -28,21 +28,45 @@ function deriveStatus(latest: OrchestratorEvent | null, fallback: string): strin
 }
 
 function stepIndex(status: string): number {
-  if (status === 'failed') return -1
-  if (status === 'done') return PIPELINE.length
+  if (status === 'done') return PIPELINE.length - 1  // 指向最后一步"完成"
   for (let i = 0; i < PIPELINE.length; i++) {
     if (PIPELINE[i].keys.includes(status)) return i
   }
-  if (status === 'idle') return -1
+  if (status === 'idle' || status === 'failed') return -1
+  return -1
+}
+
+/**
+ * 从事件历史中推算失败前的最后活跃步骤
+ */
+function lastActiveStepFromEvents(events: OrchestratorEvent[]): number {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]
+    if (ev.type === 'status-change' && ev.status) {
+      const idx = stepIndex(ev.status)
+      if (idx >= 0) return idx
+    }
+  }
   return -1
 }
 
 export function StatusFlow({ events, latestEvent, connected, requirementStatus, onReconnect }: StatusFlowProps) {
   const current = deriveStatus(latestEvent, requirementStatus)
-  const activeIdx = stepIndex(current)
+  const isDone = current === 'done'
   const isFailed = latestEvent?.type === 'failed' || current === 'failed'
+  // 失败时从事件历史推算最后活跃步骤，完成时指向最后一步
+  const activeIdx = isFailed ? lastActiveStepFromEvents(events) : stepIndex(current)
   const progress = latestEvent?.progress ?? 0
   const phase = latestEvent?.phase ?? ''
+
+  // 进度条宽度：完成→100%，失败→按步骤比例，活跃→30%动画，其他→0%
+  const barWidth = isDone
+    ? '100%'
+    : isFailed && activeIdx >= 0
+      ? `${((activeIdx + 1) / PIPELINE.length) * 100}%`
+      : activeIdx >= 0
+        ? '30%'
+        : '0%'
 
   return (
     <div className="status-flow">
@@ -58,9 +82,9 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
 
       <div className="pipeline">
         {PIPELINE.map((step, i) => {
-          const done = activeIdx >= 0 && i < activeIdx
-          const active = i === activeIdx
-          const failed = isFailed && active
+          const done = isDone || (activeIdx >= 0 && i < activeIdx)
+          const active = !isDone && !isFailed && i === activeIdx
+          const failed = isFailed && i === activeIdx
           return (
             <div key={step.label} className="pipeline-step">
               <div
@@ -77,7 +101,11 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
 
       {(phase || activeIdx >= 0) && (
         <div className="phase-row">
-          {phase ? (
+          {isDone ? (
+            <span className="muted">✅ 已完成</span>
+          ) : isFailed ? (
+            <span className="muted">❌ 已失败</span>
+          ) : phase ? (
             <>
               <span className="muted">当前</span>
               <code>{phase}</code>
@@ -91,8 +119,8 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
 
       <div className="progress-track">
         <div
-          className={`progress-fill ${activeIdx >= 0 && !progress ? 'progress-animated' : ''}`}
-          style={{ width: progress > 0 ? `${Math.min(progress, 100)}%` : activeIdx >= 0 ? '30%' : '0%' }}
+          className={`progress-fill ${activeIdx >= 0 && !progress && !isDone && !isFailed ? 'progress-animated' : ''}`}
+          style={{ width: progress > 0 ? `${Math.min(progress, 100)}%` : barWidth }}
         />
       </div>
 
