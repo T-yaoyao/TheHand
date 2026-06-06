@@ -18,7 +18,8 @@ import type { LLMClient } from '../llm/llm-client.js'
 import type { PromptManager } from '../llm/prompt-manager.js'
 import { runClarification } from '../agents/clarification-agent.js'
 import { createPlanAgent } from '../agents/plan-agent.js'
-import { runCoding } from '../agents/coding-agent.js'
+import { runCoding, runCodingBatch, extractInterfaceSummary } from '../agents/coding-agent.js'
+import { extractFileSkeletons, extractFileInterfaces, runArchitect } from '../agents/architect-agent.js'
 import { join, dirname } from 'path'
 import type { Sandbox } from '../git-ops/sandbox.js'
 import type { DockerSandboxManager } from '../git-ops/docker-sandbox.js'
@@ -404,15 +405,66 @@ export class Orchestrator {
         codeOutputs = skillOutputs.map(o => ({ path: o.path, content: o.content, summary: o.summary }))
       } else {
         const planFiles = requirement.plan ?? []
-        yield { type: 'executing', phase: `coding-agent (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 35 }
         const lastTestError = codeErrors.length > 0 ? codeErrors[codeErrors.length - 1] : undefined
-        codeOutputs = await runCoding(
-          llmClient, promptManager, planFiles, sandbox.path,
-          projectContext,
-          codingHint || undefined,
-          codeAttempt > 1 ? previousOutputs : undefined,
-          lastTestError,
-        )
+        const errorHintCombined = [
+          codingHint || '',
+          lastTestError ? `\n\n## 上轮测试失败\n${lastTestError}\n请分析错误根因并修正代码。` : '',
+          codeAttempt > 1 && previousOutputs.length > 0
+            ? '\n\n## 上轮生成的代码（仅供参考）\n' + previousOutputs.map(f => `- ${f.path}: ${f.summary}`).join('\n')
+            : '',
+        ].filter(Boolean).join('')
+
+        if (planFiles.length <= 2) {
+          // 小 plan：直接走原路径，不引入 Architect 开销
+          yield { type: 'executing', phase: `coding-agent (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 35 }
+          codeOutputs = await runCoding(
+            llmClient, promptManager, planFiles, sandbox.path,
+            projectContext,
+            codingHint || undefined,
+            codeAttempt > 1 ? previousOutputs : undefined,
+            lastTestError,
+          )
+        } else {
+          // 大 plan：三层渐进式上下文压缩
+          // Layer 1: 结构扫描
+          yield { type: 'executing', phase: `analyzing ${planFiles.length} file structures`, progress: 32 }
+          const skeletons = await extractFileSkeletons(sandbox.path, planFiles)
+
+          // Layer 2: 接口提取
+          yield { type: 'executing', phase: `extracting interfaces from ${planFiles.length} files`, progress: 33 }
+          const fileInterfaces = await extractFileInterfaces(sandbox.path, planFiles)
+
+          // Layer 3: Architect Agent
+          yield { type: 'executing', phase: 'architect analyzing dependencies...', progress: 34 }
+          const manifest = await runArchitect(
+            llmClient, promptManager, planFiles, skeletons, fileInterfaces, projectContext,
+          )
+          console.log(`[architect] manifest: ${manifest.batches.length} batches, files: ${manifest.files.map(f => f.path).join(', ')}`)
+
+          // 分批 Coding
+          const generatedSummaries = new Map<string, string>()
+          for (let bi = 0; bi < manifest.batches.length; bi++) {
+            const batch = manifest.batches[bi]
+            yield {
+              type: 'executing',
+              phase: `coding batch ${bi + 1}/${manifest.batches.length}: ${batch.files.join(', ')}`,
+              progress: 35 + Math.floor(bi * 30 / manifest.batches.length),
+            }
+
+            const batchOutputs = await runCodingBatch(
+              llmClient, promptManager, batch, manifest,
+              { globalContext: manifest.globalContext, generatedSummaries },
+              sandbox.path, projectContext,
+              errorHintCombined || undefined,
+            )
+            codeOutputs.push(...batchOutputs)
+
+            // 提取本批次的接口摘要供后续批次使用
+            for (const output of batchOutputs) {
+              generatedSummaries.set(output.path, extractInterfaceSummary(output))
+            }
+          }
+        }
       }
 
       // ──────────────────────────────────────────────────────────────

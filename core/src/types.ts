@@ -117,6 +117,57 @@ export interface SkillOutput {
 }
 
 // ============================================================
+// Architect 三层渐进式上下文压缩
+// ============================================================
+
+/** Layer 1: 文件结构骨架（纯代码提取，零 LLM 消耗） */
+export interface FileSkeleton {
+  path: string
+  fileType: 'model' | 'route' | 'component' | 'config' | 'style' | 'test' | 'other'
+  lineCount: number
+  sizeBytes: number
+  language: string
+}
+
+/** Layer 2: 文件接口信息（正则提取，零 LLM 消耗） */
+export interface FileInterface {
+  path: string
+  exports: string[]
+  imports: string[]
+  functionSignatures: string[]
+  routeDefinitions: string[]
+  modelFields: string[]
+}
+
+/** Architect Agent 输出: 变更清单 */
+export interface ChangeManifest {
+  globalContext: string
+  files: ChangeManifestFile[]
+  crossFileRefs: CrossFileRef[]
+  batches: ChangeBatch[]
+}
+
+export interface ChangeManifestFile {
+  path: string
+  action: 'create' | 'modify' | 'delete'
+  detailedChange: string
+  dependencies: string[]
+  exports: string[]
+  priority: number
+}
+
+export interface CrossFileRef {
+  from: string
+  to: string
+  ref: string
+}
+
+export interface ChangeBatch {
+  files: string[]
+  reason: string
+}
+
+// ============================================================
 // Tool 相关
 // ============================================================
 

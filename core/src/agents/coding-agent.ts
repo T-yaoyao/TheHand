@@ -1,6 +1,6 @@
 import { readFile, readdir, stat } from 'fs/promises'
 import { join, resolve, relative } from 'path'
-import type { FilePlan, ProjectContext } from '../types.js'
+import type { FilePlan, ProjectContext, ChangeManifest, ChangeManifestFile, ChangeBatch } from '../types.js'
 import type { LLMClient, ToolDefinition, Message } from '../llm/llm-client.js'
 import type { PromptManager } from '../llm/prompt-manager.js'
 
@@ -157,6 +157,141 @@ ${contextHint}${constraintsHint}${errorHint}
   // Fallback：旧的解析逻辑兜底
   console.log('[coding] function calling 未命中，使用 fallback 解析')
   return parseCodingBatchResponse(response.content, plan)
+}
+
+/**
+ * 分批生成代码：只生成一个 batch 的文件，带精简上下文
+ * 用于 Architect Agent 分批策略下的单批次执行
+ */
+export async function runCodingBatch(
+  llmClient: LLMClient,
+  promptManager: PromptManager,
+  batch: ChangeBatch,
+  manifest: ChangeManifest,
+  batchContext: {
+    globalContext: string
+    generatedSummaries: Map<string, string>
+  },
+  sandboxPath: string,
+  projectContext?: ProjectContext,
+  errorHint?: string,
+): Promise<CodeFileOutput[]> {
+  const systemPrompt = await promptManager.load('coding')
+
+  // 构建项目约束
+  let constraintsHint = ''
+  if (projectContext?.constraints) {
+    const entries = Object.entries(projectContext.constraints)
+    if (entries.length > 0) {
+      constraintsHint = '\n\n## 项目约束（必须遵守）\n' +
+        entries.map(([k, v]) => `- ${k}: ${v}`).join('\n')
+    }
+  }
+
+  // 只读取本批次文件的原始内容
+  const fileContexts: string[] = []
+  const batchManifestFiles = manifest.files.filter(f => batch.files.includes(f.path))
+  for (const filePath of batch.files) {
+    const fullPath = resolve(sandboxPath, filePath)
+    if (!fullPath.startsWith(resolve(sandboxPath))) continue
+
+    let originalContent = ''
+    try {
+      originalContent = await readFile(fullPath, 'utf-8')
+    } catch {
+      originalContent = '（新文件，不存在）'
+    }
+
+    const manifestFile = batchManifestFiles.find(f => f.path === filePath)
+    const changeDesc = manifestFile?.detailedChange ?? ''
+    fileContexts.push(`### ${filePath}\n操作: ${changeDesc}\n\`\`\`\n${originalContent}\n\`\`\``)
+  }
+
+  // 已生成文件的接口摘要（来自前序 batch）
+  let generatedSummaryHint = ''
+  if (batchContext.generatedSummaries.size > 0) {
+    const lines: string[] = ['\n\n## 已生成文件的接口摘要（供参考，不要重复生成）']
+    for (const [path, summary] of batchContext.generatedSummaries) {
+      lines.push(`- ${path}: ${summary}`)
+    }
+    generatedSummaryHint = lines.join('\n')
+  }
+
+  // 本批次涉及的 crossFileRefs
+  const batchCrossRefs = manifest.crossFileRefs.filter(
+    ref => batch.files.includes(ref.from) || batch.files.includes(ref.to)
+  )
+  let crossRefHint = ''
+  if (batchCrossRefs.length > 0) {
+    crossRefHint = '\n\n## 跨文件引用关系\n' +
+      batchCrossRefs.map(r => `- ${r.from} → ${r.to}: ${r.ref}`).join('\n')
+  }
+
+  const userMessage = `## 全局变更摘要
+${batchContext.globalContext}
+
+## 本批次需要生成的文件
+${batch.files.join(', ')}
+
+## 各文件原始内容和改动指令
+${fileContexts.join('\n\n')}
+${generatedSummaryHint}${crossRefHint}${constraintsHint}${errorHint ? '\n\n' + errorHint : ''}
+
+请输出本批次所有文件的修改结果，JSON 数组格式。`
+
+  const messages: Message[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userMessage },
+  ]
+
+  const response = await llmClient.chat(messages, {
+    tools: CODING_TOOLS,
+    agent: 'coding-batch',
+  })
+
+  // 优先从 toolCalls 直接取结果
+  if (response.toolCalls && response.toolCalls.length > 0) {
+    const tc = response.toolCalls[0]
+    if (tc.name === 'submit_files' && tc.arguments.files) {
+      console.log(`[coding-batch] 使用 function calling 直接返回文件列表 (batch: ${batch.files.join(', ')})`)
+      return tc.arguments.files as CodeFileOutput[]
+    }
+  }
+
+  // Fallback
+  console.log(`[coding-batch] function calling 未命中，使用 fallback 解析 (batch: ${batch.files.join(', ')})`)
+  return parseCodingBatchResponse(response.content, batch.files.map(path => ({ path, changeDescription: '', priority: 0 })))
+}
+
+/**
+ * 从已生成的代码中提取接口摘要，供后续 batch 参考
+ * 只提取 exports 和关键接口，不传全文
+ */
+export function extractInterfaceSummary(output: CodeFileOutput): string {
+  const content = output.content
+  if (!content || content === '__DELETE__') return '已删除'
+
+  const parts: string[] = []
+
+  // 提取 export 语句
+  const exportMatches = content.match(/^export\s+.+/gm)
+  if (exportMatches) {
+    parts.push(`exports: ${exportMatches.slice(0, 5).join('; ')}`)
+  }
+
+  // 提取函数签名
+  const funcMatches = content.match(/^(export\s+)?(function|class|const)\s+\w+/gm)
+  if (funcMatches) {
+    parts.push(`defines: ${funcMatches.slice(0, 5).join('; ')}`)
+  }
+
+  // 提取路由定义
+  const routeMatches = content.match(/^router\.(get|post|put|delete|patch)\(.+/gm)
+  if (routeMatches) {
+    parts.push(`routes: ${routeMatches.slice(0, 5).join('; ')}`)
+  }
+
+  return parts.length > 0 ? parts.join(' | ') : output.summary || '已修改'
 }
 
 /**
