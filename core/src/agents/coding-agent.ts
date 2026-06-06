@@ -1,6 +1,6 @@
 import { readFile, readdir, stat } from 'fs/promises'
 import { join, resolve, relative } from 'path'
-import type { FilePlan, ProjectContext, ChangeManifest, ChangeManifestFile, ChangeBatch } from '../types.js'
+import type { FilePlan, ProjectContext, ChangeBatch, FileInterface } from '../types.js'
 import type { LLMClient, ToolDefinition, Message } from '../llm/llm-client.js'
 import type { PromptManager } from '../llm/prompt-manager.js'
 
@@ -156,22 +156,22 @@ ${contextHint}${constraintsHint}${errorHint}
 
   // Fallback：旧的解析逻辑兜底
   console.log('[coding] function calling 未命中，使用 fallback 解析')
+  console.log(`[coding] response.finishReason=${response.finishReason}, content.length=${response.content?.length ?? 0}, content.first300=${response.content?.slice(0, 300)}`)
+  console.log(`[coding] usage: input=${response.usage.inputTokens}, output=${response.usage.outputTokens}`)
   return parseCodingBatchResponse(response.content, plan)
 }
 
 /**
  * 分批生成代码：只生成一个 batch 的文件，带精简上下文
- * 用于 Architect Agent 分批策略下的单批次执行
+ * 用于纯代码分批策略下的单批次执行
  */
 export async function runCodingBatch(
   llmClient: LLMClient,
   promptManager: PromptManager,
   batch: ChangeBatch,
-  manifest: ChangeManifest,
-  batchContext: {
-    globalContext: string
-    generatedSummaries: Map<string, string>
-  },
+  plan: FilePlan[],
+  fileInterfaces: FileInterface[],
+  generatedSummaries: Map<string, string>,
   sandboxPath: string,
   projectContext?: ProjectContext,
   errorHint?: string,
@@ -188,9 +188,8 @@ export async function runCodingBatch(
     }
   }
 
-  // 只读取本批次文件的原始内容
+  // 只读取本批次文件的原始内容 + 改动描述
   const fileContexts: string[] = []
-  const batchManifestFiles = manifest.files.filter(f => batch.files.includes(f.path))
   for (const filePath of batch.files) {
     const fullPath = resolve(sandboxPath, filePath)
     if (!fullPath.startsWith(resolve(sandboxPath))) continue
@@ -202,35 +201,44 @@ export async function runCodingBatch(
       originalContent = '（新文件，不存在）'
     }
 
-    const manifestFile = batchManifestFiles.find(f => f.path === filePath)
-    const changeDesc = manifestFile?.detailedChange ?? ''
+    const planItem = plan.find(f => f.path === filePath)
+    const changeDesc = planItem?.changeDescription ?? ''
     fileContexts.push(`### ${filePath}\n操作: ${changeDesc}\n\`\`\`\n${originalContent}\n\`\`\``)
   }
 
   // 已生成文件的接口摘要（来自前序 batch）
   let generatedSummaryHint = ''
-  if (batchContext.generatedSummaries.size > 0) {
+  if (generatedSummaries.size > 0) {
     const lines: string[] = ['\n\n## 已生成文件的接口摘要（供参考，不要重复生成）']
-    for (const [path, summary] of batchContext.generatedSummaries) {
+    for (const [path, summary] of generatedSummaries) {
       lines.push(`- ${path}: ${summary}`)
     }
     generatedSummaryHint = lines.join('\n')
   }
 
-  // 本批次涉及的 crossFileRefs
-  const batchCrossRefs = manifest.crossFileRefs.filter(
-    ref => batch.files.includes(ref.from) || batch.files.includes(ref.to)
-  )
+  // 本批次文件涉及的跨文件 import 关系
+  const batchFileSet = new Set(batch.files)
+  const batchInterfaces = fileInterfaces.filter(f => batchFileSet.has(f.path))
+  const crossRefs: string[] = []
+  for (const fi of batchInterfaces) {
+    for (const importLine of fi.imports) {
+      const importMatch = importLine.match(/from\s+['"]([^'"]+)['"]/) ||
+                          importLine.match(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/)
+      if (importMatch) {
+        const importPath = importMatch[1]
+        if (importPath.startsWith('.')) {
+          crossRefs.push(`${fi.path} imports: ${importLine.trim()}`)
+        }
+      }
+    }
+  }
   let crossRefHint = ''
-  if (batchCrossRefs.length > 0) {
-    crossRefHint = '\n\n## 跨文件引用关系\n' +
-      batchCrossRefs.map(r => `- ${r.from} → ${r.to}: ${r.ref}`).join('\n')
+  if (crossRefs.length > 0) {
+    crossRefHint = '\n\n## 本批次文件的 import 关系（注意保持一致）\n' +
+      crossRefs.map(r => `- ${r}`).join('\n')
   }
 
-  const userMessage = `## 全局变更摘要
-${batchContext.globalContext}
-
-## 本批次需要生成的文件
+  const userMessage = `## 本批次需要生成的文件
 ${batch.files.join(', ')}
 
 ## 各文件原始内容和改动指令
@@ -260,6 +268,8 @@ ${generatedSummaryHint}${crossRefHint}${constraintsHint}${errorHint ? '\n\n' + e
 
   // Fallback
   console.log(`[coding-batch] function calling 未命中，使用 fallback 解析 (batch: ${batch.files.join(', ')})`)
+  console.log(`[coding-batch] response.finishReason=${response.finishReason}, content.length=${response.content?.length ?? 0}, content.first300=${response.content?.slice(0, 300)}`)
+  console.log(`[coding-batch] usage: input=${response.usage.inputTokens}, output=${response.usage.outputTokens}`)
   return parseCodingBatchResponse(response.content, batch.files.map(path => ({ path, changeDescription: '', priority: 0 })))
 }
 

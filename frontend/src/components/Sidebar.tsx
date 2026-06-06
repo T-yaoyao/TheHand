@@ -1,3 +1,6 @@
+import { useRef } from 'react'
+import { useGSAP } from '@gsap/react'
+import gsap from 'gsap'
 import type { Requirement } from '../services/api'
 import { StatusBadge } from './StatusBadge'
 import { formatTime } from '../utils/status'
@@ -31,6 +34,25 @@ export function Sidebar({
   searchQuery,
   onSearchChange,
 }: SidebarProps) {
+  const listRef = useRef<HTMLDivElement>(null)
+  const prevCountRef = useRef(requirements.length)
+
+  // Animate new items in the list
+  useGSAP(() => {
+    if (!listRef.current) return
+    const cards = listRef.current.querySelectorAll('.req-card')
+    if (cards.length > 0 && requirements.length > prevCountRef.current) {
+      // Animate only the first (newest) card
+      gsap.from(cards[0], {
+        x: -20,
+        opacity: 0,
+        duration: 0.4,
+        ease: 'power2.out',
+      })
+    }
+    prevCountRef.current = requirements.length
+  }, { dependencies: [requirements.length], scope: listRef })
+
   return (
     <aside className={`sidebar${isOpen ? ' open' : ''}`}>
       <div className="sidebar-header">
@@ -38,7 +60,7 @@ export function Sidebar({
           <span className="logo-icon">✋</span>
           <div>
             <h1>TheHand</h1>
-            <p>PM 需求交付</p>
+            <p>需求交付平台</p>
           </div>
         </div>
         <div className="sidebar-header-actions">
@@ -63,7 +85,7 @@ export function Sidebar({
               onCreate()
             }
           }}
-          placeholder="用自然语言描述需求，例如：给文章详情页加阅读时长…"
+          placeholder="用自然语言描述需求…"
           rows={4}
         />
         <button
@@ -74,7 +96,7 @@ export function Sidebar({
         >
           {loading ? '提交中…' : '提交需求'}
         </button>
-        <span className="hint">Ctrl+Enter 快速提交</span>
+        <span className="hint">Ctrl + Enter 快速提交</span>
       </div>
 
       <div className="sidebar-list-header">
@@ -94,7 +116,7 @@ export function Sidebar({
         </div>
       )}
 
-      <div className="sidebar-list">
+      <div className="sidebar-list" ref={listRef}>
         {requirements.length === 0 ? (
           <p className="empty-hint">{searchQuery ? '无匹配需求' : '暂无需求，在上方创建'}</p>
         ) : (

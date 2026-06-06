@@ -25,7 +25,7 @@ export function NaturalSummaryView({ summary, riskAssessment, canAutoApprove, on
   return (
     <div className="natural-summary-card">
       <div className="summary-header">
-        <h3>📝 变更摘要（大白话版）</h3>
+        <h3>变更摘要</h3>
         {riskAssessment && (
           <div className={`risk-badge ${riskLevelColors[riskAssessment.riskLevel]}`}>
             {riskLevelLabels[riskAssessment.riskLevel]}
@@ -43,7 +43,7 @@ export function NaturalSummaryView({ summary, riskAssessment, canAutoApprove, on
       </div>
 
       <div className="summary-changes">
-        <h5>📋 具体变更：</h5>
+        <h5>具体变更</h5>
         <ul>
           {summary.changes.map((change: string, idx: number) => (
             <li key={idx}>{change}</li>
@@ -57,7 +57,7 @@ export function NaturalSummaryView({ summary, riskAssessment, canAutoApprove, on
 
       {riskAssessment && riskAssessment.recommendations.length > 0 && (
         <div className="recommendations">
-          <h5>💡 系统建议：</h5>
+          <h5>系统建议</h5>
           <ul>
             {riskAssessment.recommendations.map((rec: string, idx: number) => (
               <li key={idx}>{rec}</li>
@@ -69,7 +69,7 @@ export function NaturalSummaryView({ summary, riskAssessment, canAutoApprove, on
       {canAutoApprove && onAutoApprove && (
         <div className="auto-approve-section">
           <button type="button" className="btn-primary btn-large" onClick={onAutoApprove}>
-            🚀 一键自动执行（低风险，无需审核）
+            一键自动执行（低风险，无需审核）
           </button>
         </div>
       )}

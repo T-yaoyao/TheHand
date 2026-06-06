@@ -11,14 +11,25 @@ export function StatusBadge({ status }: { status: string }) {
         gap: 6,
         padding: '3px 10px',
         borderRadius: 999,
-        fontSize: 12,
+        fontSize: 11,
         fontWeight: 500,
-        background: `${color}22`,
+        background: `${color}15`,
         color,
-        border: `1px solid ${color}44`,
+        border: `1px solid ${color}30`,
+        letterSpacing: '0.02em',
       }}
     >
-      <span style={{ width: 6, height: 6, borderRadius: '50%', background: color }} />
+      <span
+        style={{
+          width: 5,
+          height: 5,
+          borderRadius: '50%',
+          background: color,
+          boxShadow: `0 0 6px ${color}80`,
+          animation: status === 'clarifying' || status === 'coding' || status === 'testing'
+            ? 'blink 2s ease-in-out infinite' : undefined,
+        }}
+      />
       {statusLabel(status)}
     </span>
   )

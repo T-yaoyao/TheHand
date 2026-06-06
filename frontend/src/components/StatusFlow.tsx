@@ -1,3 +1,6 @@
+import { useRef, useEffect } from 'react'
+import { useGSAP } from '@gsap/react'
+import gsap from 'gsap'
 import type { OrchestratorEvent } from '../hooks/useSSE'
 import { statusLabel } from '../utils/status'
 
@@ -28,17 +31,13 @@ function deriveStatus(latest: OrchestratorEvent | null, fallback: string): strin
 }
 
 function stepIndex(status: string): number {
-  if (status === 'done') return PIPELINE.length - 1  // 指向最后一步"完成"
+  if (status === 'done') return PIPELINE.length - 1
   for (let i = 0; i < PIPELINE.length; i++) {
     if (PIPELINE[i].keys.includes(status)) return i
   }
-  if (status === 'idle' || status === 'failed') return -1
   return -1
 }
 
-/**
- * 从事件历史中推算失败前的最后活跃步骤
- */
 function lastActiveStepFromEvents(events: OrchestratorEvent[]): number {
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i]
@@ -54,12 +53,49 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
   const current = deriveStatus(latestEvent, requirementStatus)
   const isDone = current === 'done'
   const isFailed = latestEvent?.type === 'failed' || current === 'failed'
-  // 失败时从事件历史推算最后活跃步骤，完成时指向最后一步
   const activeIdx = isFailed ? lastActiveStepFromEvents(events) : stepIndex(current)
   const progress = latestEvent?.progress ?? 0
   const phase = latestEvent?.phase ?? ''
 
-  // 进度条宽度：完成→100%，失败→按步骤比例，活跃→30%动画，其他→0%
+  const pipelineRef = useRef<HTMLDivElement>(null)
+  const prevActiveRef = useRef(activeIdx)
+
+  // GSAP: animate pipeline nodes when active step changes
+  useGSAP(() => {
+    if (!pipelineRef.current) return
+    const icons = pipelineRef.current.querySelectorAll('.pipeline-icon')
+
+    if (activeIdx !== prevActiveRef.current && activeIdx >= 0) {
+      const icon = icons[activeIdx]
+      if (icon) {
+        gsap.fromTo(icon,
+          { scale: 0.8, autoAlpha: 0.5 },
+          { scale: 1, autoAlpha: 1, duration: 0.5, ease: 'back.out(1.7)' }
+        )
+      }
+    }
+
+    // On completion, animate all nodes sequentially
+    if (isDone && prevActiveRef.current !== activeIdx) {
+      gsap.timeline()
+        .to(icons, {
+          scale: 1.05,
+          duration: 0.15,
+          stagger: 0.08,
+          ease: 'power1.out',
+        })
+        .to(icons, {
+          scale: 1,
+          duration: 0.2,
+          stagger: 0.08,
+          ease: 'power1.inOut',
+        })
+    }
+
+    prevActiveRef.current = activeIdx
+  }, { dependencies: [activeIdx, isDone], scope: pipelineRef })
+
+  // Progress bar width
   const barWidth = isDone
     ? '100%'
     : isFailed && activeIdx >= 0
@@ -80,7 +116,7 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
         )}
       </div>
 
-      <div className="pipeline">
+      <div className="pipeline" ref={pipelineRef}>
         {PIPELINE.map((step, i) => {
           const done = isDone || (activeIdx >= 0 && i < activeIdx)
           const active = !isDone && !isFailed && i === activeIdx
@@ -155,8 +191,8 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
           <p>{latestEvent.userMessage ?? latestEvent.error}</p>
           {latestEvent.userMessage && latestEvent.error && (
             <details style={{ marginTop: 8 }}>
-              <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--text-muted)' }}>技术详情</summary>
-              <pre style={{ fontSize: 11, marginTop: 4, whiteSpace: 'pre-wrap' }}>{latestEvent.error}</pre>
+              <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--text-dim)' }}>技术详情</summary>
+              <pre style={{ fontSize: 11, marginTop: 4, whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)' }}>{latestEvent.error}</pre>
             </details>
           )}
         </div>

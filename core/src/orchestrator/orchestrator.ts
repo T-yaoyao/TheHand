@@ -19,7 +19,7 @@ import type { PromptManager } from '../llm/prompt-manager.js'
 import { runClarification } from '../agents/clarification-agent.js'
 import { createPlanAgent } from '../agents/plan-agent.js'
 import { runCoding, runCodingBatch, extractInterfaceSummary } from '../agents/coding-agent.js'
-import { extractFileSkeletons, extractFileInterfaces, runArchitect } from '../agents/architect-agent.js'
+import { buildBatches } from '../agents/architect-agent.js'
 import { join, dirname } from 'path'
 import type { Sandbox } from '../git-ops/sandbox.js'
 import type { DockerSandboxManager } from '../git-ops/docker-sandbox.js'
@@ -418,7 +418,7 @@ export class Orchestrator {
             : '',
         ].filter(Boolean).join('')
 
-        if (planFiles.length <= 2) {
+        if (planFiles.length <= 3) {
           // 小 plan：直接走原路径，不引入 Architect 开销
           yield { type: 'executing', phase: `coding-agent (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 35 }
           codeOutputs = await runCoding(
@@ -429,44 +429,50 @@ export class Orchestrator {
             lastTestError,
           )
         } else {
-          // 大 plan：三层渐进式上下文压缩
-          // Layer 1: 结构扫描
-          yield { type: 'executing', phase: `analyzing ${planFiles.length} file structures`, progress: 32 }
-          const skeletons = await extractFileSkeletons(sandbox.path, planFiles)
-
-          // Layer 2: 接口提取
-          yield { type: 'executing', phase: `extracting interfaces from ${planFiles.length} files`, progress: 33 }
-          const fileInterfaces = await extractFileInterfaces(sandbox.path, planFiles)
-
-          // Layer 3: Architect Agent
-          yield { type: 'executing', phase: 'architect analyzing dependencies...', progress: 34 }
-          const manifest = await runArchitect(
-            llmClient, promptManager, planFiles, skeletons, fileInterfaces, projectContext,
-          )
-          console.log(`[architect] manifest: ${manifest.batches.length} batches, files: ${manifest.files.map(f => f.path).join(', ')}`)
+          // 大 plan：纯代码依赖分析 + 分批生成（零额外 LLM 消耗）
+          yield { type: 'executing', phase: `analyzing dependencies for ${planFiles.length} files`, progress: 32 }
+          const { batches, fileInterfaces } = await buildBatches(sandbox.path, planFiles)
+          console.log(`[batching] ${batches.length} batches: ${batches.map(b => `[${b.files.join(', ')}]`).join(' → ')}`)
 
           // 分批 Coding
           const generatedSummaries = new Map<string, string>()
-          for (let bi = 0; bi < manifest.batches.length; bi++) {
-            const batch = manifest.batches[bi]
+          let batchFailed = false
+          for (let bi = 0; bi < batches.length; bi++) {
+            const batch = batches[bi]
             yield {
               type: 'executing',
-              phase: `coding batch ${bi + 1}/${manifest.batches.length}: ${batch.files.join(', ')}`,
-              progress: 35 + Math.floor(bi * 30 / manifest.batches.length),
+              phase: `coding batch ${bi + 1}/${batches.length}: ${batch.files.join(', ')}`,
+              progress: 35 + Math.floor(bi * 30 / batches.length),
             }
 
-            const batchOutputs = await runCodingBatch(
-              llmClient, promptManager, batch, manifest,
-              { globalContext: manifest.globalContext, generatedSummaries },
-              sandbox.path, projectContext,
-              errorHintCombined || undefined,
-            )
-            codeOutputs.push(...batchOutputs)
+            try {
+              const batchOutputs = await runCodingBatch(
+                llmClient, promptManager, batch, planFiles, fileInterfaces,
+                generatedSummaries, sandbox.path, projectContext,
+                errorHintCombined || undefined,
+              )
+              codeOutputs.push(...batchOutputs)
 
-            // 提取本批次的接口摘要供后续批次使用
-            for (const output of batchOutputs) {
-              generatedSummaries.set(output.path, extractInterfaceSummary(output))
+              // 提取本批次的接口摘要供后续批次使用
+              for (const output of batchOutputs) {
+                generatedSummaries.set(output.path, extractInterfaceSummary(output))
+              }
+            } catch (batchErr: any) {
+              console.error(`[coding-batch] batch ${bi + 1} failed: ${batchErr.message}`)
+              yield {
+                type: 'executing',
+                phase: `batch ${bi + 1} failed: ${batchErr.message}`,
+                progress: 35 + Math.floor(bi * 30 / batches.length),
+              }
+              batchFailed = true
+              // 继续执行后续 batch，不中断
             }
+          }
+
+          // 所有 batch 都失败了，整个 coding attempt 失败
+          if (batchFailed && codeOutputs.length === 0) {
+            codeErrors.push(`第${codeAttempt}轮: 所有 batch 均失败`)
+            continue
           }
         }
       }

@@ -15,7 +15,7 @@ export { RequirementMemory } from './memory/requirement-memory.js'
 export { ProjectMemory } from './memory/project-memory.js'
 export { createPlanAgent } from './agents/plan-agent.js'
 export { createCodingAgent, runCoding, runCodingBatch, extractInterfaceSummary } from './agents/coding-agent.js'
-export { extractFileSkeletons, extractFileInterfaces, runArchitect } from './agents/architect-agent.js'
+export { extractFileInterfaces, buildBatches } from './agents/architect-agent.js'
 export { createTestAgent } from './agents/test-agent.js'
 export { runClarification, CLARIFICATION_TOOLS } from './agents/clarification-agent.js'
 export { createFileReadTool } from './tools/file-read-tool.js'
@@ -52,10 +52,6 @@ export type {
   DiffCheckResult,
   TraceSpan,
   MetricsSummary,
-  FileSkeleton,
   FileInterface,
-  ChangeManifest,
-  ChangeManifestFile,
-  CrossFileRef,
   ChangeBatch,
 } from './types.js'

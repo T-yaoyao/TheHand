@@ -1,14 +1,12 @@
 import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { randomUUID } from 'crypto'
-import { exec } from 'child_process'
-import { promisify } from 'util'
+import { execFileSync } from 'child_process'
 import { resolve } from 'path'
 import { queryAll, queryOne, execute, executeBatch } from '../db.js'
 import { isOrchestratorRunning, runOrchestratorForRequirement } from '../orchestrator-runner.js'
 import { log } from '../logger.js'
 
-const execAsync = promisify(exec)
 const sourceRepo = resolve(process.cwd(), '..', 'sandbox-repo', 'conduit-realworld-example-app')
 
 export const requirementsRouter = Router()
@@ -201,11 +199,21 @@ requirementsRouter.post('/:id/revert', async (req: Request, res: Response) => {
 
   try {
     // 通过 commit message 中的 [req:ID] 标记查找对应 commit
+    // 使用 execFileSync 绕过 shell，避免 Windows cmd.exe 对 [ ] 的转义问题
     const reqMarker = `[req:${id.slice(0, 8)}]`
-    const { stdout: logOutput } = await execAsync(
-      `git log --oneline -20 --fixed-strings --grep="${reqMarker}"`,
-      { cwd: sourceRepo },
-    )
+    log.info(`[api] 搜索 commit marker: "${reqMarker}" in ${sourceRepo}`)
+
+    let logOutput: string
+    try {
+      logOutput = execFileSync('git', [
+        'log', '--oneline', '-20', '--fixed-strings', `--grep=${reqMarker}`,
+      ], { cwd: sourceRepo, timeout: 15_000 }).toString()
+    } catch (gitErr: any) {
+      // git log 在无匹配时返回 exit code 1，stdout 为空
+      logOutput = gitErr.stdout?.toString() ?? ''
+    }
+
+    log.info(`[api] git log 结果: "${logOutput.trim().slice(0, 200)}"`)
 
     const commits = logOutput.trim().split('\n').filter(Boolean)
     if (commits.length === 0) {
@@ -215,7 +223,7 @@ requirementsRouter.post('/:id/revert', async (req: Request, res: Response) => {
 
     // revert 最新的 commit
     const commitHash = commits[0].split(' ')[0]
-    await execAsync(`git revert --no-edit ${commitHash}`, { cwd: sourceRepo })
+    execFileSync('git', ['revert', '--no-edit', commitHash], { cwd: sourceRepo, timeout: 30_000 })
 
     // 更新需求状态
     execute(`UPDATE requirements SET status = 'reverted', updated_at = datetime('now') WHERE id = ?`, [id])

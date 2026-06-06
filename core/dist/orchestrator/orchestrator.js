@@ -1,6 +1,7 @@
 import { runClarification } from '../agents/clarification-agent.js';
 import { createPlanAgent } from '../agents/plan-agent.js';
-import { runCoding } from '../agents/coding-agent.js';
+import { runCoding, runCodingBatch, extractInterfaceSummary } from '../agents/coding-agent.js';
+import { buildBatches } from '../agents/architect-agent.js';
 import { join, dirname } from 'path';
 import { TestRunner } from '../git-ops/test-runner.js';
 import { RepoManager } from '../git-ops/repo-manager.js';
@@ -310,9 +311,59 @@ export class Orchestrator {
             }
             else {
                 const planFiles = requirement.plan ?? [];
-                yield { type: 'executing', phase: `coding-agent (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 35 };
                 const lastTestError = codeErrors.length > 0 ? codeErrors[codeErrors.length - 1] : undefined;
-                codeOutputs = await runCoding(llmClient, promptManager, planFiles, sandbox.path, projectContext, codingHint || undefined, codeAttempt > 1 ? previousOutputs : undefined, lastTestError);
+                const errorHintCombined = [
+                    codingHint || '',
+                    lastTestError ? `\n\n## 上轮测试失败\n${lastTestError}\n请分析错误根因并修正代码。` : '',
+                    codeAttempt > 1 && previousOutputs.length > 0
+                        ? '\n\n## 上轮生成的代码（仅供参考）\n' + previousOutputs.map(f => `- ${f.path}: ${f.summary}`).join('\n')
+                        : '',
+                ].filter(Boolean).join('');
+                if (planFiles.length <= 3) {
+                    // 小 plan：直接走原路径，不引入 Architect 开销
+                    yield { type: 'executing', phase: `coding-agent (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 35 };
+                    codeOutputs = await runCoding(llmClient, promptManager, planFiles, sandbox.path, projectContext, codingHint || undefined, codeAttempt > 1 ? previousOutputs : undefined, lastTestError);
+                }
+                else {
+                    // 大 plan：纯代码依赖分析 + 分批生成（零额外 LLM 消耗）
+                    yield { type: 'executing', phase: `analyzing dependencies for ${planFiles.length} files`, progress: 32 };
+                    const { batches, fileInterfaces } = await buildBatches(sandbox.path, planFiles);
+                    console.log(`[batching] ${batches.length} batches: ${batches.map(b => `[${b.files.join(', ')}]`).join(' → ')}`);
+                    // 分批 Coding
+                    const generatedSummaries = new Map();
+                    let batchFailed = false;
+                    for (let bi = 0; bi < batches.length; bi++) {
+                        const batch = batches[bi];
+                        yield {
+                            type: 'executing',
+                            phase: `coding batch ${bi + 1}/${batches.length}: ${batch.files.join(', ')}`,
+                            progress: 35 + Math.floor(bi * 30 / batches.length),
+                        };
+                        try {
+                            const batchOutputs = await runCodingBatch(llmClient, promptManager, batch, planFiles, fileInterfaces, generatedSummaries, sandbox.path, projectContext, errorHintCombined || undefined);
+                            codeOutputs.push(...batchOutputs);
+                            // 提取本批次的接口摘要供后续批次使用
+                            for (const output of batchOutputs) {
+                                generatedSummaries.set(output.path, extractInterfaceSummary(output));
+                            }
+                        }
+                        catch (batchErr) {
+                            console.error(`[coding-batch] batch ${bi + 1} failed: ${batchErr.message}`);
+                            yield {
+                                type: 'executing',
+                                phase: `batch ${bi + 1} failed: ${batchErr.message}`,
+                                progress: 35 + Math.floor(bi * 30 / batches.length),
+                            };
+                            batchFailed = true;
+                            // 继续执行后续 batch，不中断
+                        }
+                    }
+                    // 所有 batch 都失败了，整个 coding attempt 失败
+                    if (batchFailed && codeOutputs.length === 0) {
+                        codeErrors.push(`第${codeAttempt}轮: 所有 batch 均失败`);
+                        continue;
+                    }
+                }
             }
             // ──────────────────────────────────────────────────────────────
             // 分级告警兜底机制 v1.0

@@ -1,4 +1,6 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
+import { useGSAP } from '@gsap/react'
+import gsap from 'gsap'
 import type { Requirement, MetricsSummary } from '../services/api'
 
 interface DashboardProps {
@@ -8,6 +10,7 @@ interface DashboardProps {
 
 export function Dashboard({ requirements, metrics }: DashboardProps) {
   const [showDashboard, setShowDashboard] = useState(false)
+  const contentRef = useRef<HTMLDivElement>(null)
 
   const stats = {
     total: requirements.length,
@@ -22,10 +25,23 @@ export function Dashboard({ requirements, metrics }: DashboardProps) {
 
   const recentRequirements = requirements.slice(0, 5)
 
+  // GSAP: animate dashboard content when expanded
+  useGSAP(() => {
+    if (!contentRef.current || !showDashboard) return
+    const cards = contentRef.current.querySelectorAll('.stat-card, .metric-item, .recent-item')
+    gsap.from(cards, {
+      y: 12,
+      autoAlpha: 0,
+      duration: 0.35,
+      stagger: 0.05,
+      ease: 'power2.out',
+    })
+  }, { dependencies: [showDashboard], scope: contentRef })
+
   return (
     <div className="dashboard">
       <div className="dashboard-header">
-        <h2>📊 需求仪表盘</h2>
+        <h2>需求仪表盘</h2>
         <button
           type="button"
           className="btn-secondary"
@@ -36,7 +52,7 @@ export function Dashboard({ requirements, metrics }: DashboardProps) {
       </div>
 
       {showDashboard && (
-        <>
+        <div ref={contentRef}>
           <div className="stats-grid">
             <div className="stat-card stat-total">
               <div className="stat-value">{stats.total}</div>
@@ -58,7 +74,7 @@ export function Dashboard({ requirements, metrics }: DashboardProps) {
 
           {metrics && (
             <div className="metrics-section">
-              <h3>📈 系统指标</h3>
+              <h3>系统指标</h3>
               <div className="metrics-grid">
                 <div className="metric-item">
                   <span className="metric-label">成功率</span>
@@ -81,7 +97,7 @@ export function Dashboard({ requirements, metrics }: DashboardProps) {
           )}
 
           <div className="status-flow-visual">
-            <h3>🔄 需求流转状态</h3>
+            <h3>需求流转状态</h3>
             <div className="status-bars">
               <div className="status-bar-item">
                 <div className="status-bar-label">待处理</div>
@@ -129,7 +145,7 @@ export function Dashboard({ requirements, metrics }: DashboardProps) {
           </div>
 
           <div className="recent-section">
-            <h3>📋 最近需求</h3>
+            <h3>最近需求</h3>
             <div className="recent-list">
               {recentRequirements.map(r => (
                 <div key={r.id} className="recent-item">
@@ -139,7 +155,7 @@ export function Dashboard({ requirements, metrics }: DashboardProps) {
               ))}
             </div>
           </div>
-        </>
+        </div>
       )}
     </div>
   )

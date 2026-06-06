@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useGSAP } from '@gsap/react'
+import gsap from 'gsap'
 import { api } from './services/api'
 import type { Requirement, Conversation, FilePlan } from './services/api'
 import { useSSE } from './hooks/useSSE'
@@ -33,16 +35,82 @@ export function App() {
   const chatEndRef = useRef<HTMLDivElement>(null)
   const selectedRef = useRef<Requirement | null>(null)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout>>()
-  /** 确认方案后短暂屏蔽「见 plan-ready 就切方案 Tab」，避免与进度页抢焦点 */
   const suppressAutoPlanTabRef = useRef(false)
-  /** 新建需求后首屏进「进度」并自动跑流水线，避免选中时强制切「对话」 */
   const preferProgressTabAfterSelectRef = useRef(false)
   selectedRef.current = selected
 
-  // 持久化 diff 数据：latestEvent 会被后续事件覆盖，需要单独存储
   const [diffData, setDiffData] = useState<{ diff: string; files: { path: string; summary: string }[]; screenshot?: string } | null>(null)
+  const [pendingApproval, setPendingApproval] = useState(false)
 
   const { events, connected, latestEvent, clearEvents, reconnect } = useSSE(selected?.id ?? null)
+
+  // GSAP refs for animated sections
+  const emptyRef = useRef<HTMLDivElement>(null)
+  const toastRef = useRef<HTMLDivElement>(null)
+  const modalRef = useRef<HTMLDivElement>(null)
+  const detailRef = useRef<HTMLDivElement>(null)
+  const messagesRef = useRef<HTMLDivElement>(null)
+
+  // GSAP: empty state entrance animation
+  useGSAP(() => {
+    if (!emptyRef.current || selected) return
+    const title = emptyRef.current.querySelector('h2')
+    const desc = emptyRef.current.querySelector('p')
+    const features = emptyRef.current.querySelectorAll('.feature-card')
+    const guide = emptyRef.current.querySelector('.empty-guide')
+
+    const tl = gsap.timeline({ defaults: { ease: 'power2.out' } })
+    if (title) tl.from(title, { y: 20, autoAlpha: 0, duration: 0.6 })
+    if (desc) tl.from(desc, { y: 16, autoAlpha: 0, duration: 0.5 }, '-=0.3')
+    if (features.length) tl.from(features, { y: 20, autoAlpha: 0, duration: 0.4, stagger: 0.1 }, '-=0.2')
+    if (guide) tl.from(guide, { autoAlpha: 0, duration: 0.4 }, '-=0.1')
+  }, { dependencies: [selected], scope: emptyRef })
+
+  // GSAP: toast entrance/exit
+  useEffect(() => {
+    if (!toast || !toastRef.current) return
+    gsap.fromTo(toastRef.current,
+      { x: 40, autoAlpha: 0 },
+      { x: 0, autoAlpha: 1, duration: 0.35, ease: 'power2.out' }
+    )
+  }, [toast])
+
+  // GSAP: modal entrance
+  useEffect(() => {
+    if (!confirmDialog || !modalRef.current) return
+    gsap.from(modalRef.current, {
+      scale: 0.9,
+      autoAlpha: 0,
+      duration: 0.3,
+      ease: 'back.out(1.7)',
+    })
+  }, [confirmDialog])
+
+  // GSAP: detail header entrance
+  useGSAP(() => {
+    if (!detailRef.current || !selected) return
+    gsap.from(detailRef.current, {
+      y: -10,
+      autoAlpha: 0,
+      duration: 0.4,
+      ease: 'power2.out',
+    })
+  }, { dependencies: [selected?.id], scope: detailRef })
+
+  // GSAP: new chat messages animate in
+  useEffect(() => {
+    if (!messagesRef.current || conversations.length === 0) return
+    const messages = messagesRef.current.querySelectorAll('.message')
+    const lastMsg = messages[messages.length - 1]
+    if (lastMsg) {
+      gsap.from(lastMsg, {
+        y: 12,
+        autoAlpha: 0,
+        duration: 0.35,
+        ease: 'power2.out',
+      })
+    }
+  }, [conversations.length])
 
   const showToast = useCallback((type: 'error' | 'success', msg: string) => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
@@ -63,7 +131,6 @@ export function App() {
       const current = selectedRef.current
       if (current) {
         const updated = list.find((r) => r.id === current.id)
-        // 仅在数据实际变化时更新（避免对象引用变化触发无限循环）
         if (updated && (updated.status !== current.status || updated.plan !== current.plan || updated.structured_requirement !== current.structured_requirement)) {
           setSelected(updated)
         }
@@ -101,17 +168,19 @@ export function App() {
     if (!latestEvent || !selected) return
     if (latestEvent.type === 'orchestrator-started') {
       suppressAutoPlanTabRef.current = false
-      // 流水线启动，立即同步状态
+      setPendingApproval(false)
       setSelected(prev => prev && prev.id === latestEvent.requirementId ? { ...prev, status: 'clarifying' } : prev)
       setRequirements(prev => prev.map(r => r.id === latestEvent.requirementId ? { ...r, status: 'clarifying' } : r))
     }
     if (latestEvent.type === 'plan-ready') {
+      setPendingApproval(true)
       refreshList()
       if (!suppressAutoPlanTabRef.current) {
         setTab('plan')
       }
     }
     if (latestEvent.type === 'diff-ready') {
+      setPendingApproval(false)
       setTab('diff')
       setDiffData({
         diff: latestEvent.diff ?? '',
@@ -128,11 +197,9 @@ export function App() {
     }
     if (latestEvent.type === 'status-change') {
       refreshList()
-      // 进入编码后默认看「进度」（含确认方案后由后端推送的首个 coding 状态）
       if (latestEvent.status === 'coding') {
         setTab('progress')
       }
-      // 仅在终态清除 thinking，中间态（coding/planning/testing）保持
       const terminalStatuses = ['done', 'failed', 'clarified', 'reverted']
       if (terminalStatuses.includes(latestEvent.status ?? '')) {
         setThinking(false)
@@ -141,6 +208,7 @@ export function App() {
     if (latestEvent.type === 'completed' || latestEvent.type === 'failed') {
       refreshList()
       setThinking(false)
+      setPendingApproval(false)
       setTab('progress')
     }
   }, [latestEvent, selected?.id, refreshList])
@@ -189,7 +257,6 @@ export function App() {
     try {
       setTab('progress')
       await api.runOrchestrator(id)
-      // 立即更新本地状态，不等 SSE 事件
       setSelected(prev => prev && prev.id === id ? { ...prev, status: 'clarifying' } : prev)
       setRequirements(prev => prev.map(r => r.id === id ? { ...r, status: 'clarifying' } : r))
       if (!opts?.skipSuccessToast) {
@@ -265,7 +332,6 @@ export function App() {
   const plan = parseJsonField<FilePlan[]>(selected?.plan ?? null)
   const livePlan = latestEvent?.type === 'plan-ready' ? latestEvent.plan : null
 
-  /** 仅在有追问并已暂停等回复时提示（澄清进行中 clarifying 不提示，避免误报） */
   const canReply = selected?.status === 'waiting-for-pm' || selected?.status === 'needs-confirmation'
   const isRunning = ['clarifying', 'clarified', 'planning', 'coding', 'testing', 'diff-ready', 'waiting-for-pm', 'needs-confirmation'].includes(selected?.status ?? '')
   const showRunButton = !isRunning || selected?.status === 'clarified' || selected?.status === 'plan-rejected'
@@ -306,9 +372,9 @@ export function App() {
         )}
 
         {!selected ? (
-          <div className="main-empty">
+          <div className="main-empty" ref={emptyRef}>
             <h2>TheHand</h2>
-            <p>用自然语言描述需求，自动完成澄清、方案、编码与测试。开发者在 GitHub 上 Review PR 即可。</p>
+            <p>用自然语言描述需求，系统自动完成澄清、方案、编码与测试。开发者在 GitHub 上 Review PR 即可。</p>
             {loadingList ? (
               <div className="skeleton-list">
                 <div className="skeleton-item" /><div className="skeleton-item" /><div className="skeleton-item" />
@@ -337,7 +403,7 @@ export function App() {
           </div>
         ) : (
           <>
-            <header className="detail-header">
+            <header className="detail-header" ref={detailRef}>
               <h2>{selected.pm_input}</h2>
               <div className="detail-actions">
                 <StatusBadge status={selected.status} />
@@ -408,7 +474,7 @@ export function App() {
               )}
 
               {tab === 'chat' && (
-                <div className="messages" aria-live="polite">
+                <div className="messages" aria-live="polite" ref={messagesRef}>
                   {conversations.length === 0 && !thinking ? (
                     <p className="empty-panel">暂无对话。澄清阶段的问题与回复将显示在这里。</p>
                   ) : (
@@ -445,13 +511,13 @@ export function App() {
               {tab === 'plan' && (
                 <div>
                   <PlanView plan={(livePlan as FilePlan[] | undefined) ?? plan} />
-                  {(selected.status === 'plan-ready' || latestEvent?.type === 'plan-ready') && (
+                  {pendingApproval && (
                     <div className="plan-actions">
                       <button type="button" className="btn-primary" onClick={async () => {
                         suppressAutoPlanTabRef.current = true
                         setRunning(true)
                         setThinking(true)
-                        // 后端 approve 会长时间 await 编排直到下一暂停点，须先切 Tab 才能马上看到进度
+                        setPendingApproval(false)
                         setTab('progress')
                         try {
                           await api.approvePlan(selected.id)
@@ -460,6 +526,7 @@ export function App() {
                         } catch (e: unknown) {
                           suppressAutoPlanTabRef.current = false
                           setTab('plan')
+                          setPendingApproval(true)
                           showToast('error', e instanceof Error ? e.message : '确认失败')
                           setThinking(false)
                         } finally {
@@ -470,11 +537,13 @@ export function App() {
                       </button>
                       <button type="button" className="btn-secondary" onClick={async () => {
                         setRunning(true)
+                        setPendingApproval(false)
                         try {
                           await api.rejectPlan(selected.id)
                           showToast('success', '方案已驳回，请修改需求后重新运行')
                           refreshList()
                         } catch (e: unknown) {
+                          setPendingApproval(true)
                           showToast('error', e instanceof Error ? e.message : '驳回失败')
                         } finally {
                           setRunning(false)
@@ -569,8 +638,7 @@ export function App() {
                     />
                     <button
                       type="button"
-                      className="btn-primary"
-                      style={{ width: 'auto', marginTop: 0 }}
+                      className="btn-primary chat-send-btn"
                       onClick={handleSend}
                       disabled={sending || !chatInput.trim()}
                     >
@@ -588,14 +656,18 @@ export function App() {
         )}
       </main>
 
-      {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
+      {toast && (
+        <div className={`toast toast-${toast.type}`} ref={toastRef}>
+          {toast.msg}
+        </div>
+      )}
 
       {confirmDialog && (
         <div className="modal-overlay" onClick={() => setConfirmDialog(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} ref={modalRef}>
             <p>{confirmDialog.message}</p>
             <div className="modal-actions">
-              <button type="button" className="btn-primary" onClick={confirmDialog.onConfirm}>确定</button>
+              <button type="button" className="btn-primary modal-confirm-btn" onClick={confirmDialog.onConfirm}>确定</button>
               <button type="button" className="btn-secondary" onClick={() => setConfirmDialog(null)}>取消</button>
             </div>
           </div>

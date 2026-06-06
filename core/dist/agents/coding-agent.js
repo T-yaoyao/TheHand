@@ -126,7 +126,127 @@ ${contextHint}${constraintsHint}${errorHint}
     }
     // Fallback：旧的解析逻辑兜底
     console.log('[coding] function calling 未命中，使用 fallback 解析');
+    console.log(`[coding] response.finishReason=${response.finishReason}, content.length=${response.content?.length ?? 0}, content.first300=${response.content?.slice(0, 300)}`);
+    console.log(`[coding] usage: input=${response.usage.inputTokens}, output=${response.usage.outputTokens}`);
     return parseCodingBatchResponse(response.content, plan);
+}
+/**
+ * 分批生成代码：只生成一个 batch 的文件，带精简上下文
+ * 用于纯代码分批策略下的单批次执行
+ */
+export async function runCodingBatch(llmClient, promptManager, batch, plan, fileInterfaces, generatedSummaries, sandboxPath, projectContext, errorHint) {
+    const systemPrompt = await promptManager.load('coding');
+    // 构建项目约束
+    let constraintsHint = '';
+    if (projectContext?.constraints) {
+        const entries = Object.entries(projectContext.constraints);
+        if (entries.length > 0) {
+            constraintsHint = '\n\n## 项目约束（必须遵守）\n' +
+                entries.map(([k, v]) => `- ${k}: ${v}`).join('\n');
+        }
+    }
+    // 只读取本批次文件的原始内容 + 改动描述
+    const fileContexts = [];
+    for (const filePath of batch.files) {
+        const fullPath = resolve(sandboxPath, filePath);
+        if (!fullPath.startsWith(resolve(sandboxPath)))
+            continue;
+        let originalContent = '';
+        try {
+            originalContent = await readFile(fullPath, 'utf-8');
+        }
+        catch {
+            originalContent = '（新文件，不存在）';
+        }
+        const planItem = plan.find(f => f.path === filePath);
+        const changeDesc = planItem?.changeDescription ?? '';
+        fileContexts.push(`### ${filePath}\n操作: ${changeDesc}\n\`\`\`\n${originalContent}\n\`\`\``);
+    }
+    // 已生成文件的接口摘要（来自前序 batch）
+    let generatedSummaryHint = '';
+    if (generatedSummaries.size > 0) {
+        const lines = ['\n\n## 已生成文件的接口摘要（供参考，不要重复生成）'];
+        for (const [path, summary] of generatedSummaries) {
+            lines.push(`- ${path}: ${summary}`);
+        }
+        generatedSummaryHint = lines.join('\n');
+    }
+    // 本批次文件涉及的跨文件 import 关系
+    const batchFileSet = new Set(batch.files);
+    const batchInterfaces = fileInterfaces.filter(f => batchFileSet.has(f.path));
+    const crossRefs = [];
+    for (const fi of batchInterfaces) {
+        for (const importLine of fi.imports) {
+            const importMatch = importLine.match(/from\s+['"]([^'"]+)['"]/) ||
+                importLine.match(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/);
+            if (importMatch) {
+                const importPath = importMatch[1];
+                if (importPath.startsWith('.')) {
+                    crossRefs.push(`${fi.path} imports: ${importLine.trim()}`);
+                }
+            }
+        }
+    }
+    let crossRefHint = '';
+    if (crossRefs.length > 0) {
+        crossRefHint = '\n\n## 本批次文件的 import 关系（注意保持一致）\n' +
+            crossRefs.map(r => `- ${r}`).join('\n');
+    }
+    const userMessage = `## 本批次需要生成的文件
+${batch.files.join(', ')}
+
+## 各文件原始内容和改动指令
+${fileContexts.join('\n\n')}
+${generatedSummaryHint}${crossRefHint}${constraintsHint}${errorHint ? '\n\n' + errorHint : ''}
+
+请输出本批次所有文件的修改结果，JSON 数组格式。`;
+    const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userMessage },
+    ];
+    const response = await llmClient.chat(messages, {
+        tools: CODING_TOOLS,
+        agent: 'coding-batch',
+    });
+    // 优先从 toolCalls 直接取结果
+    if (response.toolCalls && response.toolCalls.length > 0) {
+        const tc = response.toolCalls[0];
+        if (tc.name === 'submit_files' && tc.arguments.files) {
+            console.log(`[coding-batch] 使用 function calling 直接返回文件列表 (batch: ${batch.files.join(', ')})`);
+            return tc.arguments.files;
+        }
+    }
+    // Fallback
+    console.log(`[coding-batch] function calling 未命中，使用 fallback 解析 (batch: ${batch.files.join(', ')})`);
+    console.log(`[coding-batch] response.finishReason=${response.finishReason}, content.length=${response.content?.length ?? 0}, content.first300=${response.content?.slice(0, 300)}`);
+    console.log(`[coding-batch] usage: input=${response.usage.inputTokens}, output=${response.usage.outputTokens}`);
+    return parseCodingBatchResponse(response.content, batch.files.map(path => ({ path, changeDescription: '', priority: 0 })));
+}
+/**
+ * 从已生成的代码中提取接口摘要，供后续 batch 参考
+ * 只提取 exports 和关键接口，不传全文
+ */
+export function extractInterfaceSummary(output) {
+    const content = output.content;
+    if (!content || content === '__DELETE__')
+        return '已删除';
+    const parts = [];
+    // 提取 export 语句
+    const exportMatches = content.match(/^export\s+.+/gm);
+    if (exportMatches) {
+        parts.push(`exports: ${exportMatches.slice(0, 5).join('; ')}`);
+    }
+    // 提取函数签名
+    const funcMatches = content.match(/^(export\s+)?(function|class|const)\s+\w+/gm);
+    if (funcMatches) {
+        parts.push(`defines: ${funcMatches.slice(0, 5).join('; ')}`);
+    }
+    // 提取路由定义
+    const routeMatches = content.match(/^router\.(get|post|put|delete|patch)\(.+/gm);
+    if (routeMatches) {
+        parts.push(`routes: ${routeMatches.slice(0, 5).join('; ')}`);
+    }
+    return parts.length > 0 ? parts.join(' | ') : output.summary || '已修改';
 }
 /**
  * 解析批量编码结果：JSON 数组

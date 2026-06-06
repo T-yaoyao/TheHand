@@ -1,83 +1,14 @@
-import { readFile, stat } from 'fs/promises'
-import { join, resolve, extname } from 'path'
-import type {
-  FilePlan,
-  ProjectContext,
-  FileSkeleton,
-  FileInterface,
-  ChangeManifest,
-} from '../types.js'
-import type { LLMClient, Message } from '../llm/llm-client.js'
-import type { PromptManager } from '../llm/prompt-manager.js'
+import { readFile } from 'fs/promises'
+import { resolve, dirname, join } from 'path'
+import type { FilePlan, FileInterface, ChangeBatch } from '../types.js'
 
 // ============================================================
-// Layer 1: 文件结构骨架（纯代码，零 LLM 消耗）
-// ============================================================
-
-const FILE_TYPE_MAP: Record<string, FileSkeleton['fileType']> = {
-  '.js': 'other', '.ts': 'other', '.jsx': 'component', '.tsx': 'component',
-  '.vue': 'component', '.css': 'style', '.scss': 'style', '.less': 'style',
-  '.json': 'config', '.yaml': 'config', '.yml': 'config',
-  '.md': 'other', '.test.js': 'test', '.test.ts': 'test',
-  '.spec.js': 'test', '.spec.ts': 'test',
-}
-
-function classifyFileType(filePath: string): FileSkeleton['fileType'] {
-  const lower = filePath.toLowerCase()
-  if (lower.includes('/models/') || lower.includes('\\models\\')) return 'model'
-  if (lower.includes('/routes/') || lower.includes('\\routes\\')) return 'route'
-  if (lower.includes('/components/') || lower.includes('\\components\\')) return 'component'
-  if (lower.includes('/pages/') || lower.includes('\\pages\\')) return 'component'
-  if (lower.includes('.test.') || lower.includes('.spec.') || lower.includes('/__tests__/')) return 'test'
-  if (lower.includes('.css') || lower.includes('.scss') || lower.includes('.less')) return 'style'
-  const ext = extname(lower)
-  return FILE_TYPE_MAP[ext] ?? 'other'
-}
-
-/**
- * Layer 1: 提取文件结构骨架
- * 只用 fs.stat + 文件路径分类，不读文件内容，零 LLM 消耗
- */
-export async function extractFileSkeletons(
-  sandboxPath: string,
-  plan: FilePlan[],
-): Promise<FileSkeleton[]> {
-  const skeletons: FileSkeleton[] = []
-
-  for (const file of plan) {
-    const fullPath = resolve(sandboxPath, file.path)
-    if (!fullPath.startsWith(resolve(sandboxPath))) continue
-
-    let lineCount = 0
-    let sizeBytes = 0
-    try {
-      const fileStat = await stat(fullPath)
-      sizeBytes = fileStat.size
-      // 粗略估算行数：用文件大小 / 平均行宽 50 字节
-      lineCount = Math.ceil(sizeBytes / 50)
-    } catch {
-      // 新文件，不存在
-    }
-
-    skeletons.push({
-      path: file.path,
-      fileType: classifyFileType(file.path),
-      lineCount,
-      sizeBytes,
-      language: extname(file.path) || 'unknown',
-    })
-  }
-
-  return skeletons
-}
-
-// ============================================================
-// Layer 2: 文件接口提取（正则，零 LLM 消耗）
+// 文件接口提取（正则，零 LLM 消耗）
 // ============================================================
 
 /**
- * Layer 2: 用正则提取文件的接口信息
- * 只读 exports/imports/函数签名等骨架行，不关注实现细节
+ * 用正则提取文件的接口信息
+ * 只读 imports 等骨架行，不关注实现细节
  */
 export async function extractFileInterfaces(
   sandboxPath: string,
@@ -86,6 +17,8 @@ export async function extractFileInterfaces(
   const interfaces: FileInterface[] = []
 
   for (const file of plan) {
+    // 用 FilePlan.path 作为统一路径（正斜杠），不用 resolve 的结果
+    const normalizedPath = file.path.replace(/\\/g, '/')
     const fullPath = resolve(sandboxPath, file.path)
     if (!fullPath.startsWith(resolve(sandboxPath))) continue
 
@@ -93,9 +26,8 @@ export async function extractFileInterfaces(
     try {
       content = await readFile(fullPath, 'utf-8')
     } catch {
-      // 新文件，没有接口可提取
       interfaces.push({
-        path: file.path,
+        path: normalizedPath,
         exports: [],
         imports: [],
         functionSignatures: [],
@@ -105,7 +37,7 @@ export async function extractFileInterfaces(
       continue
     }
 
-    interfaces.push(extractInterfaceFromContent(file.path, content))
+    interfaces.push(extractInterfaceFromContent(normalizedPath, content))
   }
 
   return interfaces
@@ -125,32 +57,28 @@ function extractInterfaceFromContent(filePath: string, content: string): FileInt
   for (const line of lines) {
     const trimmed = line.trim()
 
-    // import 语句
     if (/^import\s/.test(trimmed)) {
       imports.push(trimmed)
       continue
     }
-
-    // export 语句
+    // CJS require: const x = require('./path')
+    if (/require\s*\(\s*['"]\./.test(trimmed)) {
+      imports.push(trimmed)
+      continue
+    }
     if (/^export\s/.test(trimmed)) {
       exports.push(trimmed)
       continue
     }
-
-    // 函数/class 定义
     if (/^(export\s+)?(function|class)\s+\w+/.test(trimmed) ||
         /^(export\s+)?(const|let|var)\s+\w+\s*=\s*(async\s*)?\(/.test(trimmed)) {
       functionSignatures.push(trimmed)
       continue
     }
-
-    // 路由定义
     if (/^router\.(get|post|put|delete|patch|use)\s*\(/.test(trimmed)) {
       routeDefinitions.push(trimmed)
       continue
     }
-
-    // Sequelize 模型字段
     if (/^\w+:\s*\{/.test(trimmed) && /type:\s*DataTypes\.\w+/.test(trimmed)) {
       modelFields.push(trimmed)
       continue
@@ -161,133 +89,189 @@ function extractInterfaceFromContent(filePath: string, content: string): FileInt
 }
 
 // ============================================================
-// Layer 3: Architect Agent（LLM 调用，输入已压缩）
+// 纯代码依赖分析 + 拓扑分批（零 LLM 消耗）
 // ============================================================
 
 /**
- * Architect Agent: 分析文件骨架和接口，输出结构化变更清单
- * 输入是压缩后的骨架+接口（~10-15K tokens），不是文件全文
+ * 从 import 语句中解析出引用的模块路径
+ * 支持: import x from './path', require('./path'), import('./path')
  */
-export async function runArchitect(
-  llmClient: LLMClient,
-  promptManager: PromptManager,
-  plan: FilePlan[],
-  skeletons: FileSkeleton[],
-  fileInterfaces: FileInterface[],
-  projectContext?: ProjectContext,
-): Promise<ChangeManifest> {
-  const systemPrompt = await promptManager.load('architect')
+function parseImportPaths(importLine: string): string[] {
+  const paths: string[] = []
 
-  // 组装骨架摘要
-  const skeletonSummary = skeletons.map(s =>
-    `- ${s.path} [${s.fileType}] ${s.lineCount}行 ${Math.round(s.sizeBytes / 1024)}KB`
-  ).join('\n')
+  // import x from './path' 或 import { x } from './path'
+  const esmMatch = importLine.match(/from\s+['"]([^'"]+)['"]/)
+  if (esmMatch) paths.push(esmMatch[1])
 
-  // 组装接口摘要
-  const interfaceSummary = fileInterfaces.map(f => {
-    const parts = [`### ${f.path}`]
-    if (f.exports.length > 0) parts.push(`exports: ${f.exports.slice(0, 10).join(', ')}`)
-    if (f.imports.length > 0) parts.push(`imports: ${f.imports.slice(0, 5).join(', ')}`)
-    if (f.functionSignatures.length > 0) parts.push(`functions: ${f.functionSignatures.slice(0, 5).join(', ')}`)
-    if (f.routeDefinitions.length > 0) parts.push(`routes: ${f.routeDefinitions.slice(0, 5).join(', ')}`)
-    if (f.modelFields.length > 0) parts.push(`fields: ${f.modelFields.slice(0, 10).join(', ')}`)
-    return parts.join('\n')
-  }).join('\n\n')
+  // require('./path')
+  const cjsMatch = importLine.match(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/)
+  if (cjsMatch) paths.push(cjsMatch[1])
 
-  // 组装项目上下文（只传关键信息，不传全文）
-  let contextHint = ''
-  if (projectContext?.models) {
-    contextHint += `\n\n项目模型定义：\n${JSON.stringify(projectContext.models, null, 2)}`
-  }
-  if (projectContext?.routes) {
-    contextHint += `\n\n项目路由表：\n${JSON.stringify(projectContext.routes, null, 2)}`
-  }
-  if (projectContext?.constraints) {
-    const entries = Object.entries(projectContext.constraints)
-    if (entries.length > 0) {
-      contextHint += `\n\n项目约束：\n${entries.map(([k, v]) => `- ${k}: ${v}`).join('\n')}`
-    }
-  }
+  // import('./path')
+  const dynamicMatch = importLine.match(/import\s*\(\s*['"]([^'"]+)['"]\s*\)/)
+  if (dynamicMatch) paths.push(dynamicMatch[1])
 
-  const userMessage = `## 技术方案
-${plan.map(f => `- ${f.path}: ${f.changeDescription} (priority: ${f.priority})`).join('\n')}
+  return paths
+}
 
-## 文件骨架
-${skeletonSummary}
+/**
+ * 将 import 路径解析为项目内的文件路径
+ * 处理: 相对路径、省略扩展名、index 文件
+ */
+function resolveImportToFilePath(
+  importPath: string,
+  fromFile: string,
+  planFilePaths: Set<string>,
+): string | null {
+  // 只处理相对路径（项目内引用），跳过 node_modules 包名
+  if (!importPath.startsWith('.')) return null
 
-## 文件接口信息
-${interfaceSummary}
-${contextHint}
+  const fromDir = dirname(fromFile)
+  const resolved = join(fromDir, importPath).replace(/\\/g, '/')
 
-请分析依赖关系，输出 ChangeManifest JSON。`
-
-  const messages: Message[] = [
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: userMessage },
+  // 尝试精确匹配 + 常见扩展名 + index 文件
+  const candidates = [
+    resolved,
+    `${resolved}.js`, `${resolved}.jsx`, `${resolved}.ts`, `${resolved}.tsx`,
+    `${resolved}/index.js`, `${resolved}/index.jsx`, `${resolved}/index.ts`, `${resolved}/index.tsx`,
   ]
 
-  const response = await llmClient.chat(messages, { agent: 'architect' })
+  for (const candidate of candidates) {
+    if (planFilePaths.has(candidate)) return candidate
+  }
 
-  return parseArchitectResponse(response.content, plan)
+  return null
 }
 
 /**
- * 解析 Architect Agent 的输出
+ * 构建 plan 文件间的依赖图（邻接表）
+ * 依赖 = 文件 A import 了文件 B（B 必须先生成）
  */
-function parseArchitectResponse(response: string, plan: FilePlan[]): ChangeManifest {
-  let json: any = null
+function buildDependencyGraph(
+  fileInterfaces: FileInterface[],
+  planFilePaths: Set<string>,
+): Map<string, Set<string>> {
+  const graph = new Map<string, Set<string>>()
 
-  // 尝试直接解析
-  try {
-    json = JSON.parse(response)
-  } catch {
-    // 从代码块中提取
-    const match = response.match(/```(?:json)?\n([\s\S]*?)```/)
-    if (match) {
-      try {
-        json = JSON.parse(match[1])
-      } catch {}
+  for (const fi of fileInterfaces) {
+    if (!graph.has(fi.path)) graph.set(fi.path, new Set())
+
+    for (const importLine of fi.imports) {
+      const importPaths = parseImportPaths(importLine)
+      for (const importPath of importPaths) {
+        const resolved = resolveImportToFilePath(importPath, fi.path, planFilePaths)
+        if (resolved && resolved !== fi.path) {
+          // fi.path 依赖 resolved（resolved 必须先生成）
+          graph.get(fi.path)!.add(resolved)
+        }
+      }
     }
   }
 
-  // 从花括号提取
-  if (!json) {
-    const braceMatch = response.match(/\{[\s\S]*\}/)
-    if (braceMatch) {
-      try {
-        json = JSON.parse(braceMatch[0])
-      } catch {}
-    }
-  }
-
-  // 校验必要字段
-  if (json && json.globalContext && Array.isArray(json.files) && Array.isArray(json.batches)) {
-    return json as ChangeManifest
-  }
-
-  // 降级：基于 plan 生成一个简单的 ChangeManifest
-  console.warn('[architect] 解析失败，使用降级策略')
-  return buildFallbackManifest(plan)
+  return graph
 }
 
 /**
- * 降级策略：当 Architect 输出无法解析时，基于 FilePlan 生成基础 manifest
+ * 拓扑排序分批：Kahn 算法
+ * 无依赖的文件在第 1 批，依赖第 1 批的在第 2 批，以此类推
+ * 同一批内的文件无互相依赖，可以并行生成
  */
-function buildFallbackManifest(plan: FilePlan[]): ChangeManifest {
-  return {
-    globalContext: `共需修改 ${plan.length} 个文件`,
-    files: plan.map((f, i) => ({
-      path: f.path,
-      action: 'modify' as const,
-      detailedChange: f.changeDescription,
-      dependencies: [],
-      exports: [],
-      priority: f.priority ?? i + 1,
-    })),
-    crossFileRefs: [],
-    batches: [{
-      files: plan.map(f => f.path),
-      reason: '降级策略：不分批，一次性生成',
-    }],
+function topologicalBatches(
+  plan: FilePlan[],
+  graph: Map<string, Set<string>>,
+): ChangeBatch[] {
+  const allPaths = new Set(plan.map(f => f.path))
+
+  // 构建反向图：dependency → Set<dependent>
+  // 当 dependency 被处理时，dependent 的入度减 1
+  const reverseGraph = new Map<string, Set<string>>()
+  for (const path of allPaths) reverseGraph.set(path, new Set())
+  for (const [file, deps] of graph) {
+    for (const dep of deps) {
+      if (!reverseGraph.has(dep)) reverseGraph.set(dep, new Set())
+      reverseGraph.get(dep)!.add(file)
+    }
   }
+
+  // 计算每个文件的入度（有多少前置依赖需要先生成）
+  const inDegree = new Map<string, number>()
+  for (const path of allPaths) inDegree.set(path, 0)
+  for (const [file, deps] of graph) {
+    inDegree.set(file, deps.size)
+  }
+
+  const batches: ChangeBatch[] = []
+  const assigned = new Set<string>()
+
+  while (assigned.size < allPaths.size) {
+    // 找出入度为 0 且未分配的文件（当前层）
+    const currentLayer: string[] = []
+    for (const path of allPaths) {
+      if (!assigned.has(path) && (inDegree.get(path) ?? 0) === 0) {
+        currentLayer.push(path)
+      }
+    }
+
+    // 防止死循环：如果找不到入度为 0 的文件，说明有循环依赖，把剩余文件全部放入一批
+    if (currentLayer.length === 0) {
+      const remaining = [...allPaths].filter(p => !assigned.has(p))
+      if (remaining.length > 0) {
+        batches.push({ files: remaining, reason: '循环依赖，强制一批' })
+      }
+      break
+    }
+
+    batches.push({
+      files: currentLayer,
+      reason: currentLayer.length === 1
+        ? '无依赖或依赖已满足'
+        : `${currentLayer.length} 个文件无互相依赖，可并行生成`,
+    })
+
+    // 标记已分配，通过反向图精确递减依赖者的入度
+    for (const path of currentLayer) {
+      assigned.add(path)
+    }
+    for (const path of currentLayer) {
+      const dependents = reverseGraph.get(path)
+      if (dependents) {
+        for (const dependent of dependents) {
+          inDegree.set(dependent, (inDegree.get(dependent) ?? 0) - 1)
+        }
+      }
+    }
+  }
+
+  return batches
+}
+
+/**
+ * 主入口：基于依赖分析的纯代码分批
+ * 零 LLM 消耗，确定性执行，不会失败
+ */
+export async function buildBatches(
+  sandboxPath: string,
+  plan: FilePlan[],
+): Promise<{ batches: ChangeBatch[]; fileInterfaces: FileInterface[] }> {
+  // 提取文件接口
+  const fileInterfaces = await extractFileInterfaces(sandboxPath, plan)
+
+  // 构建 plan 文件路径集合
+  const planFilePaths = new Set(plan.map(f => f.path))
+
+  // 构建依赖图
+  const graph = buildDependencyGraph(fileInterfaces, planFilePaths)
+
+  // 拓扑排序分批
+  const batches = topologicalBatches(plan, graph)
+
+  // 如果只有一个文件，不需要分批
+  if (plan.length <= 1) {
+    return {
+      batches: [{ files: plan.map(f => f.path), reason: '单文件，不需要分批' }],
+      fileInterfaces,
+    }
+  }
+
+  return { batches, fileInterfaces }
 }

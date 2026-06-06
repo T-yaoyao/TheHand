@@ -14,7 +14,8 @@ export { TestRunner } from './git-ops/test-runner.js';
 export { RequirementMemory } from './memory/requirement-memory.js';
 export { ProjectMemory } from './memory/project-memory.js';
 export { createPlanAgent } from './agents/plan-agent.js';
-export { createCodingAgent, runCoding } from './agents/coding-agent.js';
+export { createCodingAgent, runCoding, runCodingBatch, extractInterfaceSummary } from './agents/coding-agent.js';
+export { extractFileInterfaces, buildBatches } from './agents/architect-agent.js';
 export { createTestAgent } from './agents/test-agent.js';
 export { runClarification, CLARIFICATION_TOOLS } from './agents/clarification-agent.js';
 export { createFileReadTool } from './tools/file-read-tool.js';
@@ -24,5 +25,5 @@ export { RiskAssessor } from './utils/risk-assessor.js';
 export { NaturalSummaryGenerator } from './utils/natural-summary-generator.js';
 export { DiffSafetyChecker } from './utils/diff-safety-checker.js';
 export { Tracer, globalTracer } from './utils/tracer.js';
-export type { Requirement, RequirementStatus, Conversation, Lesson, ChangeRecord, StructuredRequirement, AgentDefinition, AgentContext, MemoryContext, AgentResult, SkillDefinition, SkillOutput, Tool, ToolResult, ToolContext, ProjectContext, OrchestratorEvent, ExecutionRecord, RiskAssessment, NaturalLanguageSummary, DiffCheckResult, TraceSpan, MetricsSummary, } from './types.js';
+export type { Requirement, RequirementStatus, Conversation, Lesson, ChangeRecord, StructuredRequirement, AgentDefinition, AgentContext, MemoryContext, AgentResult, SkillDefinition, SkillOutput, Tool, ToolResult, ToolContext, ProjectContext, OrchestratorEvent, ExecutionRecord, RiskAssessment, NaturalLanguageSummary, DiffCheckResult, TraceSpan, MetricsSummary, FileInterface, ChangeBatch, } from './types.js';
 //# sourceMappingURL=index.d.ts.map

@@ -77,6 +77,20 @@ export interface SkillOutput {
     content: string;
     summary: string;
 }
+/** 文件接口信息（正则提取，零 LLM 消耗） */
+export interface FileInterface {
+    path: string;
+    exports: string[];
+    imports: string[];
+    functionSignatures: string[];
+    routeDefinitions: string[];
+    modelFields: string[];
+}
+/** 一个代码生成批次 */
+export interface ChangeBatch {
+    files: string[];
+    reason: string;
+}
 export interface Tool {
     name: string;
     description: string;
