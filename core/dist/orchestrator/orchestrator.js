@@ -9,6 +9,7 @@ import { RiskAssessor } from '../utils/risk-assessor.js';
 import { NaturalSummaryGenerator } from '../utils/natural-summary-generator.js';
 import { DiffSafetyChecker } from '../utils/diff-safety-checker.js';
 import { globalTracer } from '../utils/tracer.js';
+import { validateRequirement, validationErrorsToQuestions } from '../utils/requirement-validator.js';
 /**
  * 核心调度引擎：状态机驱动的 Agent 调度循环
  * 支持多阶段暂停：plan-ready → 用户审批 → coding → diff-ready → 用户确认 → commit
@@ -143,6 +144,51 @@ export class Orchestrator {
                     type: 'waiting-for-pm',
                     requirement: { ...requirement, status: 'needs-confirmation' },
                     questions: ['当前需求信息不完整，系统已自动填充默认值，请确认结构化需求是否正确，确认后继续生成方案。'],
+                };
+                return;
+            }
+            // ── 校验结构化需求的完整性 ──
+            const validEntities = projectContext?.models ? Object.keys(projectContext.models) : [];
+            const validation = validateRequirement(requirement.structuredRequirement, validEntities);
+            if (!validation.valid) {
+                const questions = validationErrorsToQuestions(validation.errors);
+                console.log(`[orchestrator] 需求校验未通过: ${questions.join('; ')}`);
+                // 可自动修复 → 追问 PM
+                if (validation.autoFixable && currentRound < 3) {
+                    await requirementMemory.addConversation({
+                        id: crypto.randomUUID(),
+                        requirementId: requirement.id,
+                        role: 'system',
+                        content: questions.join('\n'),
+                        round: currentRound + 1,
+                        createdAt: new Date(),
+                    });
+                    requirement.status = 'clarifying';
+                    await requirementMemory.saveRequirement(requirement);
+                    this.sandboxShouldCleanup = false;
+                    yield {
+                        type: 'waiting-for-pm',
+                        requirement: { ...requirement, status: 'clarifying' },
+                        questions,
+                    };
+                    return;
+                }
+                // 不可自动修复或已到轮次上限 → needs-confirmation
+                requirement.status = 'needs-confirmation';
+                await requirementMemory.saveRequirement(requirement);
+                this.sandboxShouldCleanup = false;
+                await requirementMemory.addConversation({
+                    id: crypto.randomUUID(),
+                    requirementId: requirement.id,
+                    role: 'system',
+                    content: `⚠️ 需求校验未通过：\n${questions.join('\n')}\n请确认或补充后继续。`,
+                    round: currentRound,
+                    createdAt: new Date(),
+                });
+                yield {
+                    type: 'waiting-for-pm',
+                    requirement: { ...requirement, status: 'needs-confirmation' },
+                    questions: [...questions, '请确认或补充以上信息后继续。'],
                 };
                 return;
             }
@@ -837,12 +883,15 @@ export class Orchestrator {
      * 处理 PM 回复（追问后的继续流程）
      */
     async *continueWithPMReply(requirement, pmReply, projectId = 'conduit') {
+        // 从对话历史推算当前轮次（与 run() 保持一致：PM 回复数 + 1）
+        const recentConvs = await this.deps.requirementMemory.getRecentConversations(requirement.id, 50);
+        const pmReplyCount = recentConvs.filter(c => c.role === 'pm').length;
         await this.deps.requirementMemory.addConversation({
             id: crypto.randomUUID(),
             requirementId: requirement.id,
             role: 'pm',
             content: pmReply,
-            round: requirement.structuredRequirement?._round ?? 1,
+            round: 1 + pmReplyCount,
             createdAt: new Date(),
         });
         requirement.pmInput = pmReply;

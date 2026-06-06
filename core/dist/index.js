@@ -23,4 +23,5 @@ export { RiskAssessor } from './utils/risk-assessor.js';
 export { NaturalSummaryGenerator } from './utils/natural-summary-generator.js';
 export { DiffSafetyChecker } from './utils/diff-safety-checker.js';
 export { Tracer, globalTracer } from './utils/tracer.js';
+export { validateRequirement, validationErrorsToQuestions } from './utils/requirement-validator.js';
 //# sourceMappingURL=index.js.map

@@ -77,6 +77,16 @@ export interface SkillOutput {
     content: string;
     summary: string;
 }
+export interface ValidationError {
+    field: string;
+    message: string;
+    severity: 'error' | 'warning';
+}
+export interface ValidationResult {
+    valid: boolean;
+    errors: ValidationError[];
+    autoFixable: boolean;
+}
 /** 文件接口信息（正则提取，零 LLM 消耗） */
 export interface FileInterface {
     path: string;

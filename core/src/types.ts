@@ -118,6 +118,22 @@ export interface SkillOutput {
 }
 
 // ============================================================
+// 需求校验
+// ============================================================
+
+export interface ValidationError {
+  field: string           // 缺失的字段名，如 'entity'、'fields'
+  message: string         // 给 PM 看的提示
+  severity: 'error' | 'warning'
+}
+
+export interface ValidationResult {
+  valid: boolean
+  errors: ValidationError[]
+  autoFixable: boolean    // 能否通过自动追问修复
+}
+
+// ============================================================
 // 纯代码依赖分析 + 分批
 // ============================================================
 

@@ -100,11 +100,12 @@ ${prompt}
             const response = await this.llmClient.chat(messages, {
                 tools: CODING_TOOLS,
                 agent: 'skill',
+                maxTokens: 16384,
             });
             // 优先从 toolCalls 直接取结果
             if (response.toolCalls && response.toolCalls.length > 0) {
                 const tc = response.toolCalls[0];
-                if (tc.name === 'submit_files' && tc.arguments.files) {
+                if (tc.name === 'submit_files' && typeof tc.arguments === 'object' && tc.arguments !== null && tc.arguments.files) {
                     console.log('[skill] 使用 function calling 直接返回文件列表');
                     return tc.arguments.files;
                 }

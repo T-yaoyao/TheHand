@@ -30,7 +30,7 @@ export class LLMClient {
             model: this.config.model,
             messages,
             temperature: this.config.temperature,
-            max_tokens: this.config.maxTokens,
+            max_tokens: options?.maxTokens ?? this.config.maxTokens,
         };
         if (options?.tools && options.tools.length > 0) {
             body.tools = options.tools;

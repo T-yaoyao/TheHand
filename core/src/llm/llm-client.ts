@@ -76,7 +76,7 @@ export class LLMClient {
    */
   async chat(
     messages: Message[],
-    options?: { tools?: ToolDefinition[]; agent?: string }
+    options?: { tools?: ToolDefinition[]; agent?: string; maxTokens?: number }
   ): Promise<LLMResponse> {
     const startTime = Date.now()
 
@@ -84,7 +84,7 @@ export class LLMClient {
       model: this.config.model,
       messages,
       temperature: this.config.temperature,
-      max_tokens: this.config.maxTokens,
+      max_tokens: options?.maxTokens ?? this.config.maxTokens,
     }
 
     if (options?.tools && options.tools.length > 0) {

@@ -82,8 +82,14 @@ export function createClarificationAgent() {
  * Function Calling 优先路径，保留旧解析作为 fallback
  */
 export async function runClarification(llmClient, promptManager, pmInput, projectContext, currentRequirement, round = 1, previousQuestions = [], pmReplies = []) {
-    // 加载 prompt 模板
-    const systemPrompt = await promptManager.load('clarification');
+    // 动态生成 entity 列表
+    const entityList = projectContext?.models
+        ? Object.keys(projectContext.models).join('|')
+        : 'unknown';
+    // 加载 prompt 模板，注入 entity 列表
+    const systemPrompt = await promptManager.loadAndRender('clarification', {
+        entityList,
+    });
     // 构建用户消息：当前结构化需求 + PM 新输入
     let userMessage = pmInput;
     if (currentRequirement) {
@@ -124,19 +130,31 @@ export async function runClarification(llmClient, promptManager, pmInput, projec
     if (response.toolCalls && response.toolCalls.length > 0) {
         const tc = response.toolCalls[0];
         if (tc.name === 'submit_requirement' && tc.arguments) {
-            console.log('[clarification] 使用 function calling: submit_requirement');
-            const req = tc.arguments;
-            return {
-                requirement: req,
-                needsMoreInfo: false,
-                questions: null,
-                round,
-            };
+            const args = tc.arguments;
+            // 运行时校验 FC 返回的必要字段（safeParseJSON 失败时 args 可能是 string）
+            if (typeof args === 'object' && args !== null && args.type && args.entity && args.scope && args.description) {
+                console.log('[clarification] 使用 function calling: submit_requirement');
+                const req = {
+                    type: args.type,
+                    entity: args.entity,
+                    fields: args.fields ?? undefined,
+                    scope: args.scope,
+                    description: args.description,
+                };
+                return {
+                    requirement: req,
+                    needsMoreInfo: false,
+                    questions: null,
+                    round,
+                };
+            }
+            // FC 返回了不完整的参数，走 fallback
+            console.log('[clarification] submit_requirement 参数不完整，走 fallback');
         }
         if (tc.name === 'ask_for_clarification' && tc.arguments?.questions) {
             console.log('[clarification] 使用 function calling: ask_for_clarification');
             return {
-                requirement: currentRequirement ?? currentOrDefault(''),
+                requirement: currentRequirement ?? currentOrDefault(pmInput),
                 needsMoreInfo: true,
                 questions: tc.arguments.questions,
                 round,
@@ -157,13 +175,41 @@ function parseClarificationResponse(response, round, currentRequirement) {
         json = JSON.parse(response);
     }
     catch {
-        // 尝试从文本中提取 JSON
-        const match = response.match(/\{[\s\S]*?\}/);
-        if (match) {
-            try {
-                json = JSON.parse(match[0]);
+        // 用深度计数提取最外层 JSON 对象（正确处理嵌套）
+        const start = response.indexOf('{');
+        if (start !== -1) {
+            let depth = 0;
+            let inString = false;
+            let escape = false;
+            for (let i = start; i < response.length; i++) {
+                const ch = response[i];
+                if (escape) {
+                    escape = false;
+                    continue;
+                }
+                if (ch === '\\' && inString) {
+                    escape = true;
+                    continue;
+                }
+                if (ch === '"') {
+                    inString = !inString;
+                    continue;
+                }
+                if (inString)
+                    continue;
+                if (ch === '{')
+                    depth++;
+                else if (ch === '}') {
+                    depth--;
+                    if (depth === 0) {
+                        try {
+                            json = JSON.parse(response.slice(start, i + 1));
+                        }
+                        catch { }
+                        break;
+                    }
+                }
             }
-            catch { }
         }
     }
     // 如果解析成功且包含必要字段

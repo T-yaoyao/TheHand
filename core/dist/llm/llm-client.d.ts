@@ -52,6 +52,7 @@ export declare class LLMClient {
     chat(messages: Message[], options?: {
         tools?: ToolDefinition[];
         agent?: string;
+        maxTokens?: number;
     }): Promise<LLMResponse>;
     /**
      * 简单对话（不需要工具调用）
