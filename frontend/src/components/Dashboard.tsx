@@ -12,7 +12,7 @@ export function Dashboard({ requirements, metrics }: DashboardProps) {
   const stats = {
     total: requirements.length,
     idle: requirements.filter(r => r.status === 'idle').length,
-    clarifying: requirements.filter(r => r.status === 'clarifying').length,
+    clarifying: requirements.filter(r => r.status === 'clarifying' || r.status === 'waiting-for-pm' || r.status === 'needs-confirmation').length,
     planning: requirements.filter(r => r.status === 'planning' || r.status === 'plan-ready').length,
     coding: requirements.filter(r => r.status === 'coding').length,
     testing: requirements.filter(r => r.status === 'testing').length,

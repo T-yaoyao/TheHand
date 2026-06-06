@@ -733,46 +733,6 @@
   line-height: 1.5;
 }
 
-/* Structured */
-.structured-view {
-  max-width: 640px;
-}
-
-.struct-row {
-  display: flex;
-  gap: 16px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--border);
-  font-size: 14px;
-}
-
-.struct-row-block {
-  flex-direction: column;
-  gap: 6px;
-}
-
-.struct-label {
-  min-width: 64px;
-  color: var(--text-muted);
-  font-weight: 600;
-  font-size: 12px;
-  text-transform: uppercase;
-}
-
-.json-details {
-  margin-top: 16px;
-}
-
-.json-details pre {
-  margin-top: 8px;
-  padding: 12px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-size: 12px;
-  overflow-x: auto;
-}
-
 .toast {
   position: fixed;
   bottom: 24px;

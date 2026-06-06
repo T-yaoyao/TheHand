@@ -1,5 +1,5 @@
 import { z } from 'zod';
-export type RequirementStatus = 'idle' | 'clarifying' | 'clarified' | 'needs-confirmation' | 'planning' | 'plan-ready' | 'plan-approved' | 'plan-rejected' | 'coding' | 'testing' | 'diff-ready' | 'done' | 'failed' | 'reverted';
+export type RequirementStatus = 'idle' | 'clarifying' | 'clarified' | 'waiting-for-pm' | 'needs-confirmation' | 'planning' | 'plan-ready' | 'plan-approved' | 'plan-rejected' | 'coding' | 'testing' | 'diff-ready' | 'done' | 'failed' | 'reverted';
 export interface Requirement {
     id: string;
     status: RequirementStatus;

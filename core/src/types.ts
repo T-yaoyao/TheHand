@@ -8,6 +8,7 @@ export type RequirementStatus =
   | 'idle'
   | 'clarifying'
   | 'clarified'
+  | 'waiting-for-pm'
   | 'needs-confirmation'
   | 'planning'
   | 'plan-ready'

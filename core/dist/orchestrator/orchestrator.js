@@ -91,7 +91,8 @@ export class Orchestrator {
             const pmReplies = recentConvs.filter(c => c.role === 'pm');
             const currentRound = 1 + pmReplies.length;
             let pmInput = requirement.pmInput;
-            if (requirement.status === 'clarifying' && pmReplies.length > 0) {
+            if ((requirement.status === 'clarifying' || requirement.status === 'waiting-for-pm' || requirement.status === 'needs-confirmation') &&
+                pmReplies.length > 0) {
                 pmInput = pmReplies.map(c => c.content).join('\n');
             }
             const previousQuestions = recentConvs
@@ -111,13 +112,14 @@ export class Orchestrator {
                     });
                 }
                 // 必须在 yield 之前保存到 DB，因为 for-await break 会触发 generator.return() 跳过 yield 之后的代码
-                requirement.status = 'clarifying';
+                // 使用 waiting-for-pm 与「澄清进行中 clarifying」区分：前者才表示已有追问、等待 PM 回复
+                requirement.status = 'waiting-for-pm';
                 requirement.structuredRequirement = clarificationResult.requirement;
                 await requirementMemory.saveRequirement(requirement);
                 this.sandboxShouldCleanup = false; // 暂停点，保留沙箱供后续 resume
                 yield {
                     type: 'waiting-for-pm',
-                    requirement: { ...requirement, status: 'clarifying' },
+                    requirement: { ...requirement, status: 'waiting-for-pm' },
                     questions,
                 };
                 return;

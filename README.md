@@ -107,11 +107,10 @@ npm run dev:frontend
 
 浏览器打开 http://localhost:5173 ：
 
-1. 左侧创建需求  
-2. 选中需求后切到 **「进度」** Tab（建立 SSE）  
-3. 点击 **「▶ 运行流水线」**（后端会真正执行 Orchestrator 并推送事件）
+1. 左侧输入需求并提交（会自动选中、打开 **「进度」** Tab 并启动流水线，建立 SSE）  
+2. 在 **「方案」** Tab 审批方案后继续；**「对话」** Tab 用于澄清追问回复  
 
-需已配置根目录 `.env`（`DOUBAO_*`），且存在 `sandbox-repo/conduit-realworld-example-app`。
+需已配置根目录 `.env`（`DOUBAO_*`），且存在 `sandbox-repo/conduit-realworld-example-app`。需要手动重跑时仍可使用 **「运行流水线」**。
 
 ## 核心模块（`core/`）
 
