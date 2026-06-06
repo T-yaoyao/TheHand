@@ -7,10 +7,9 @@ import { Sidebar } from './components/Sidebar'
 import { StatusFlow } from './components/StatusFlow'
 import { StatusBadge } from './components/StatusBadge'
 import { PlanView } from './components/PlanView'
-import { StructuredView } from './components/StructuredView'
 import './App.css'
 
-type Tab = 'progress' | 'chat' | 'plan' | 'diff' | 'detail'
+type Tab = 'progress' | 'chat' | 'plan' | 'diff'
 
 export function App() {
   const [requirements, setRequirements] = useState<Requirement[]>([])
@@ -34,6 +33,10 @@ export function App() {
   const chatEndRef = useRef<HTMLDivElement>(null)
   const selectedRef = useRef<Requirement | null>(null)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  /** 确认方案后短暂屏蔽「见 plan-ready 就切方案 Tab」，避免与进度页抢焦点 */
+  const suppressAutoPlanTabRef = useRef(false)
+  /** 新建需求后首屏进「进度」并自动跑流水线，避免选中时强制切「对话」 */
+  const preferProgressTabAfterSelectRef = useRef(false)
   selectedRef.current = selected
 
   // 持久化 diff 数据：latestEvent 会被后续事件覆盖，需要单独存储
@@ -76,11 +79,17 @@ export function App() {
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    suppressAutoPlanTabRef.current = false
     if (selected) {
       api.getConversations(selected.id).then(setConversations).catch(() => setConversations([]))
       clearEvents()
       setDiffData(null)
-      setTab('chat')
+      if (preferProgressTabAfterSelectRef.current) {
+        setTab('progress')
+        preferProgressTabAfterSelectRef.current = false
+      } else {
+        setTab('chat')
+      }
     }
   }, [selected?.id, clearEvents])
 
@@ -91,13 +100,16 @@ export function App() {
   useEffect(() => {
     if (!latestEvent || !selected) return
     if (latestEvent.type === 'orchestrator-started') {
+      suppressAutoPlanTabRef.current = false
       // 流水线启动，立即同步状态
       setSelected(prev => prev && prev.id === latestEvent.requirementId ? { ...prev, status: 'clarifying' } : prev)
       setRequirements(prev => prev.map(r => r.id === latestEvent.requirementId ? { ...r, status: 'clarifying' } : r))
     }
     if (latestEvent.type === 'plan-ready') {
-      setTab('plan')
       refreshList()
+      if (!suppressAutoPlanTabRef.current) {
+        setTab('plan')
+      }
     }
     if (latestEvent.type === 'diff-ready') {
       setTab('diff')
@@ -116,6 +128,10 @@ export function App() {
     }
     if (latestEvent.type === 'status-change') {
       refreshList()
+      // 进入编码后默认看「进度」（含确认方案后由后端推送的首个 coding 状态）
+      if (latestEvent.status === 'coding') {
+        setTab('progress')
+      }
       // 仅在终态清除 thinking，中间态（coding/planning/testing）保持
       const terminalStatuses = ['done', 'failed', 'clarified', 'reverted']
       if (terminalStatuses.includes(latestEvent.status ?? '')) {
@@ -134,12 +150,15 @@ export function App() {
     setCreating(true)
     try {
       const req = await api.createRequirement(newInput.trim())
+      preferProgressTabAfterSelectRef.current = true
       setRequirements((prev) => [req, ...prev])
       setSelected(req)
       setNewInput('')
-      showToast('success', '需求已提交')
+      await doRun(req.id, { skipSuccessToast: true, silentErrorToast: true })
+      showToast('success', '需求已提交，流水线已启动')
     } catch (e: unknown) {
-      showToast('error', e instanceof Error ? e.message : '创建失败')
+      preferProgressTabAfterSelectRef.current = false
+      showToast('error', e instanceof Error ? e.message : '创建或启动流水线失败')
     } finally {
       setCreating(false)
     }
@@ -163,7 +182,7 @@ export function App() {
     }
   }
 
-  const doRun = async (id: string) => {
+  const doRun = async (id: string, opts?: { skipSuccessToast?: boolean; silentErrorToast?: boolean }) => {
     setConfirmDialog(null)
     setRunning(true)
     clearEvents()
@@ -173,9 +192,14 @@ export function App() {
       // 立即更新本地状态，不等 SSE 事件
       setSelected(prev => prev && prev.id === id ? { ...prev, status: 'clarifying' } : prev)
       setRequirements(prev => prev.map(r => r.id === id ? { ...r, status: 'clarifying' } : r))
-      showToast('success', '流水线已启动')
+      if (!opts?.skipSuccessToast) {
+        showToast('success', '流水线已启动')
+      }
     } catch (e: unknown) {
-      showToast('error', e instanceof Error ? e.message : '触发失败')
+      if (!opts?.silentErrorToast) {
+        showToast('error', e instanceof Error ? e.message : '触发失败')
+      }
+      throw e
     } finally {
       setRunning(false)
     }
@@ -239,11 +263,11 @@ export function App() {
   }
 
   const plan = parseJsonField<FilePlan[]>(selected?.plan ?? null)
-  const structured = parseJsonField<unknown>(selected?.structured_requirement ?? null)
   const livePlan = latestEvent?.type === 'plan-ready' ? latestEvent.plan : null
 
-  const canReply = selected?.status === 'clarifying' || selected?.status === 'waiting-for-pm'
-  const isRunning = ['clarifying', 'clarified', 'planning', 'coding', 'testing', 'diff-ready'].includes(selected?.status ?? '')
+  /** 仅在有追问并已暂停等回复时提示（澄清进行中 clarifying 不提示，避免误报） */
+  const canReply = selected?.status === 'waiting-for-pm' || selected?.status === 'needs-confirmation'
+  const isRunning = ['clarifying', 'clarified', 'planning', 'coding', 'testing', 'diff-ready', 'waiting-for-pm', 'needs-confirmation'].includes(selected?.status ?? '')
   const showRunButton = !isRunning || selected?.status === 'clarified' || selected?.status === 'plan-rejected'
   const runButtonText = running ? '运行中…' : (selected?.status === 'done' || selected?.status === 'failed') ? '重新运行' : '运行流水线'
 
@@ -294,7 +318,7 @@ export function App() {
                 <div className="features">
                   <div className="feature-card">
                     <strong>澄清</strong>
-                    <span>识别歧义，输出结构化需求</span>
+                    <span>识别歧义，收敛可执行需求</span>
                   </div>
                   <div className="feature-card">
                     <strong>方案</strong>
@@ -339,7 +363,7 @@ export function App() {
             </header>
 
             <div className="banner">
-              提交需求后，系统将自动分析需求、生成代码方案、编码并测试。你可以随时在下方对话中回复澄清问题。
+              提交需求后将自动开始流水线：澄清 → 方案 → 编码与测试。需要补充说明时可在「对话」中回复。
             </div>
 
             <nav className="tabs" role="tablist">
@@ -349,7 +373,6 @@ export function App() {
                   ['chat', '对话'],
                   ['plan', '方案'],
                   ['diff', '变更预览'],
-                  ['detail', '结构化需求'],
                 ] as const
               ).map(([key, label]) => (
                 <button
@@ -425,14 +448,18 @@ export function App() {
                   {(selected.status === 'plan-ready' || latestEvent?.type === 'plan-ready') && (
                     <div className="plan-actions">
                       <button type="button" className="btn-primary" onClick={async () => {
+                        suppressAutoPlanTabRef.current = true
                         setRunning(true)
                         setThinking(true)
+                        // 后端 approve 会长时间 await 编排直到下一暂停点，须先切 Tab 才能马上看到进度
+                        setTab('progress')
                         try {
                           await api.approvePlan(selected.id)
                           showToast('success', '方案已确认，开始编码')
-                          refreshList()
-                          setTab('progress')
+                          await refreshList()
                         } catch (e: unknown) {
+                          suppressAutoPlanTabRef.current = false
+                          setTab('plan')
                           showToast('error', e instanceof Error ? e.message : '确认失败')
                           setThinking(false)
                         } finally {
@@ -521,8 +548,6 @@ export function App() {
                   )}
                 </div>
               )}
-
-              {tab === 'detail' && <StructuredView data={structured} />}
             </div>
 
             {tab === 'chat' && (

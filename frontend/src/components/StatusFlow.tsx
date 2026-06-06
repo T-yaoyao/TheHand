@@ -2,7 +2,7 @@ import type { OrchestratorEvent } from '../hooks/useSSE'
 import { statusLabel } from '../utils/status'
 
 const PIPELINE = [
-  { keys: ['clarifying', 'clarified'], label: '澄清' },
+  { keys: ['clarifying', 'clarified', 'waiting-for-pm', 'needs-confirmation'], label: '澄清' },
   { keys: ['planning', 'plan-approved', 'plan-rejected'], label: '方案' },
   { keys: ['coding'], label: '编码' },
   { keys: ['testing'], label: '测试' },

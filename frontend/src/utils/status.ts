@@ -1,6 +1,7 @@
 export const STATUS_LABELS: Record<string, string> = {
   idle: '待处理',
   clarifying: '澄清中',
+  'needs-confirmation': '待确认需求',
   clarified: '已澄清',
   planning: '方案中',
   'plan-ready': '方案就绪',
@@ -18,6 +19,7 @@ export const STATUS_LABELS: Record<string, string> = {
 export const STATUS_COLORS: Record<string, string> = {
   idle: '#6b7280',
   clarifying: '#5b8def',
+  'needs-confirmation': '#f5a524',
   clarified: '#3dd68c',
   planning: '#5b8def',
   'plan-ready': '#3dd68c',

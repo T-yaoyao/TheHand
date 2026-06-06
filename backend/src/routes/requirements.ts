@@ -13,7 +13,7 @@ const sourceRepo = resolve(process.cwd(), '..', 'sandbox-repo', 'conduit-realwor
 
 export const requirementsRouter = Router()
 
-const VALID_STATUSES = ['idle', 'clarifying', 'clarified', 'waiting-for-pm', 'planning', 'plan-ready', 'plan-approved', 'plan-rejected', 'coding', 'testing', 'diff-ready', 'done', 'failed', 'reverted']
+const VALID_STATUSES = ['idle', 'clarifying', 'clarified', 'waiting-for-pm', 'needs-confirmation', 'planning', 'plan-ready', 'plan-approved', 'plan-rejected', 'coding', 'testing', 'diff-ready', 'done', 'failed', 'reverted']
 
 /**
  * POST /api/requirements — 创建需求
