@@ -5,6 +5,43 @@ const PRICING_CNY_PER_MILLION = {
 };
 const TOKENS_PER_MILLION = 1_000_000;
 /**
+ * 将 assistant message 里 tool 的 arguments 规范为对象。
+ * 兼容：API 已解析为 object / 仍为 JSON 字符串 / 带 ```json 围栏 / 豆包偶发空串。
+ */
+export function normalizeAssistantToolArguments(raw) {
+    if (raw === null || raw === undefined)
+        return {};
+    if (typeof raw === 'object' && !Array.isArray(raw)) {
+        return raw;
+    }
+    if (typeof raw !== 'string')
+        return {};
+    let s = raw.trim();
+    if (!s)
+        return {};
+    const fence = s.match(/^```(?:json)?\s*([\s\S]*?)```$/m);
+    if (fence)
+        s = fence[1].trim();
+    try {
+        const v = JSON.parse(s);
+        return typeof v === 'object' && v !== null && !Array.isArray(v) ? v : {};
+    }
+    catch {
+        const start = s.indexOf('{');
+        const end = s.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            try {
+                const v = JSON.parse(s.slice(start, end + 1));
+                return typeof v === 'object' && v !== null && !Array.isArray(v) ? v : {};
+            }
+            catch {
+                return {};
+            }
+        }
+        return {};
+    }
+}
+/**
  * LLM 调用客户端
  * 封装火山方舟 doubao API（OpenAI 兼容格式）
  */
@@ -34,8 +71,14 @@ export class LLMClient {
         };
         if (options?.tools && options.tools.length > 0) {
             body.tools = options.tools;
+            if (options.requireFunctionCallName) {
+                body.tool_choice = {
+                    type: 'function',
+                    function: { name: options.requireFunctionCallName },
+                };
+            }
         }
-        const response = await fetch(this.config.endpoint, {
+        let res = await fetch(this.config.endpoint, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -43,11 +86,31 @@ export class LLMClient {
             },
             body: JSON.stringify(body),
         });
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`LLM API 调用失败 (${response.status}): ${errorText}`);
+        if (!res.ok) {
+            let errText = await res.text();
+            if (options?.requireFunctionCallName &&
+                body.tool_choice &&
+                (res.status === 400 || res.status === 422)) {
+                console.warn('[llm] tool_choice 被拒，重试省略 tool_choice:', errText.slice(0, 400));
+                const { tool_choice: _omit, ...retryBody } = body;
+                res = await fetch(this.config.endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${this.config.apiKey}`,
+                    },
+                    body: JSON.stringify(retryBody),
+                });
+                if (!res.ok) {
+                    errText = await res.text();
+                    throw new Error(`LLM API 调用失败 (${res.status}): ${errText}`);
+                }
+            }
+            else {
+                throw new Error(`LLM API 调用失败 (${res.status}): ${errText}`);
+            }
         }
-        const data = await response.json();
+        const data = await res.json();
         if (data.error) {
             throw new Error(`LLM API 错误: ${JSON.stringify(data.error)}`);
         }
@@ -71,36 +134,60 @@ export class LLMClient {
         if (this.tokenHistory.length > 1000) {
             this.tokenHistory = this.tokenHistory.slice(-500);
         }
-        // 解析 tool_calls（如果有）
-        let toolCalls = null;
-        if (choice.message?.tool_calls) {
-            toolCalls = choice.message.tool_calls.map((tc) => ({
-                id: tc.id,
-                name: tc.function.name,
-                arguments: this.safeParseJSON(tc.function.arguments),
-            }));
-        }
-        // 防御：finish_reason=tool_calls 但 tool_calls 为空（doubao API 兼容性问题）
-        if (choice.finish_reason === 'tool_calls' && !toolCalls) {
-            console.warn(`[llm] finish_reason=tool_calls 但 message.tool_calls 为空`);
-            console.warn(`[llm] choice keys: ${Object.keys(choice)}`);
-            console.warn(`[llm] message keys: ${Object.keys(choice.message ?? {})}`);
-            console.warn(`[llm] raw choice (截断): ${JSON.stringify(choice).slice(0, 500)}`);
-            // 尝试从其他字段提取 tool_calls（部分 API 放在 choice 级别而非 message 级别）
-            if (choice.tool_calls) {
-                console.warn(`[llm] 在 choice.tool_calls 找到，尝试提取...`);
-                toolCalls = choice.tool_calls.map((tc) => ({
-                    id: tc.id ?? '',
-                    name: tc.function?.name ?? tc.name ?? '',
-                    arguments: this.safeParseJSON(tc.function?.arguments ?? tc.arguments ?? '{}'),
-                }));
-            }
-        }
+        // 解析 tool_calls：合并多路径、规范化 arguments（object / JSON 字符串 / 围栏）
+        const toolCalls = this.extractToolCallsFromChoice(data, choice);
         return {
             content: choice.message?.content ?? '',
             toolCalls,
             usage,
             finishReason: choice.finish_reason ?? 'stop',
+        };
+    }
+    /**
+     * 从 OpenAI / 方舟等兼容响应中提取 tool_calls，尽量覆盖字段差异。
+     */
+    extractToolCallsFromChoice(data, choice) {
+        const rawList = [];
+        const pushArr = (arr) => {
+            if (Array.isArray(arr))
+                rawList.push(...arr);
+        };
+        pushArr(choice.message?.tool_calls);
+        pushArr(choice.tool_calls);
+        pushArr(data.message?.tool_calls);
+        if (rawList.length === 0) {
+            if (choice.finish_reason === 'tool_calls') {
+                console.warn('[llm] finish_reason=tool_calls 但各路径 tool_calls 均为空，choice 截断:', JSON.stringify(choice).slice(0, 600));
+            }
+            return null;
+        }
+        const out = [];
+        const seen = new Set();
+        for (const tc of rawList) {
+            const mapped = this.mapOneToolCall(tc);
+            if (!mapped)
+                continue;
+            const dedupeKey = mapped.id || `${mapped.name}:${JSON.stringify(mapped.arguments).slice(0, 120)}`;
+            if (seen.has(dedupeKey))
+                continue;
+            seen.add(dedupeKey);
+            out.push(mapped);
+        }
+        return out.length > 0 ? out : null;
+    }
+    mapOneToolCall(tc) {
+        if (!tc || typeof tc !== 'object')
+            return null;
+        const fn = tc.function ?? tc;
+        const name = String(fn?.name ?? tc.name ?? '').trim();
+        if (!name)
+            return null;
+        const rawArgs = fn?.arguments ?? tc.arguments;
+        const argumentsObj = normalizeAssistantToolArguments(rawArgs);
+        return {
+            id: String(tc.id ?? ''),
+            name,
+            arguments: argumentsObj,
         };
     }
     /**
@@ -135,14 +222,6 @@ export class LLMClient {
      */
     getHistory() {
         return [...this.tokenHistory];
-    }
-    safeParseJSON(str) {
-        try {
-            return JSON.parse(str);
-        }
-        catch {
-            return str;
-        }
     }
 }
 //# sourceMappingURL=llm-client.js.map

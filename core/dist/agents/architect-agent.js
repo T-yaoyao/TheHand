@@ -1,5 +1,8 @@
 import { readFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import { resolve, dirname, join } from 'path';
+import { matchPathGlob } from '../utils/path-glob.js';
+import { isRouteTableModulePath, pickApplicationEntryForRouteTable } from '../utils/route-wiring-entry.js';
 // ============================================================
 // Architect Agent Function Calling 输出工具定义
 // ============================================================
@@ -142,7 +145,7 @@ export function createArchitectAgent(systemPrompt) {
         description: '分析文件依赖关系，产出精确分批方案和详细改动指令',
         maxRounds: 3,
         systemPrompt,
-        tools: ['file-read'],
+        tools: [],
         outputTool: ARCHITECT_OUTPUT_TOOL,
     };
 }
@@ -243,7 +246,8 @@ ${fileInterfaceText}
         }
     }
     // 7. 确保新文件被集成（每个 create 必须有父文件 modify 引用它）
-    const integrationResult = ensureNewFilesIntegrated(output, plan, sandboxPath);
+    const integrationResult = ensureNewFilesIntegrated(output, plan, sandboxPath, projectContext);
+    ensureBatchesCoverArchitectFiles(normalizedBatches, integrationResult.files);
     console.log(`[architect] LLM 分析完成: ${normalizedBatches.length} batches, ${integrationResult.crossFileRefs.length} cross-file refs`);
     console.log(`[architect] batches: ${normalizedBatches.map(b => `[${b.files.join(', ')}]`).join(' → ')}`);
     if (integrationResult.injectedParents.length > 0) {
@@ -259,11 +263,103 @@ ${fileInterfaceText}
 // ============================================================
 // 新文件集成校验 + 自动补全
 // ============================================================
+function pickRouteEntryPath(sandboxPath, ri) {
+    for (const p of ri.routeEntryFiles ?? []) {
+        const rel = p.replace(/\\/g, '/');
+        if (existsSync(resolve(sandboxPath, rel)))
+            return rel;
+    }
+    return null;
+}
+function isNestedNewPageForRoutingIntegration(filePath, ri) {
+    const glob = ri.nestedNewPageGlob?.trim();
+    if (!glob)
+        return false;
+    const norm = filePath.replace(/\\/g, '/');
+    if (!matchPathGlob(norm, glob))
+        return false;
+    for (const ex of ri.nestedNewPageExcludeGlobs ?? []) {
+        if (ex && matchPathGlob(norm, ex))
+            return false;
+    }
+    return true;
+}
+/**
+ * 当 project.json 配置了 thehand.routingIntegration 时：
+ * 新建页面命中 nestedNewPageGlob 且未命中 exclude 时，强制在 routeEntryFiles 之一中注册路由。
+ */
+function injectRoutingIntegrationForNestedPages(projectContext, newFile, files, crossFileRefs, injectedParents, sandboxPath) {
+    const ri = projectContext?.thehand?.routingIntegration;
+    if (!ri || ri.enabled === false)
+        return;
+    if (!ri.routeEntryFiles?.length || !ri.nestedNewPageGlob?.trim())
+        return;
+    if (newFile.action !== 'create')
+        return;
+    if (!isNestedNewPageForRoutingIntegration(newFile.path, ri))
+        return;
+    const routeEntry = pickRouteEntryPath(sandboxPath, ri);
+    if (!routeEntry)
+        return;
+    const COMPONENT_EXTS = /\.(jsx?|tsx|vue)$/;
+    const base = newFile.path.split('/').pop()?.replace(COMPONENT_EXTS, '') ?? '';
+    if (!base)
+        return;
+    const alreadyLinked = crossFileRefs.some(r => r.from === routeEntry && r.to === newFile.path);
+    if (alreadyLinked)
+        return;
+    const siblingHint = ri.injectSiblingRouteHint?.trim() || '与已有同级子路由一致';
+    const parentHint = ri.nestedRouteParentHint?.trim() || '父级导航 / 嵌套路由中使用的 path 片段';
+    const note = `【自动补充-路由表】在 ${routeEntry} 的 <Routes>（或项目等价路由表）中为「${base}」增加路由；` +
+        `须与 ${parentHint} 对齐。` +
+        `请 import ${base} 并挂载为 element（${siblingHint}）。`;
+    const existingEntry = files.find(f => f.path === routeEntry);
+    if (existingEntry) {
+        if (!existingEntry.detailedChange.includes(`「${base}」`)) {
+            existingEntry.detailedChange += `\n${note}`;
+        }
+    }
+    else {
+        files.push({
+            path: routeEntry,
+            action: 'modify',
+            detailedChange: note,
+            dependencies: [newFile.path],
+            exports: [],
+            priority: Math.max(0, newFile.priority - 1),
+        });
+        injectedParents.push(routeEntry);
+    }
+    crossFileRefs.push({
+        from: routeEntry,
+        to: newFile.path,
+        ref: `路由表注册 + import ${base}（thehand.routingIntegration）`,
+    });
+}
+/** 将 architecture.files 中尚未出现在任一批次的 path 补进最后一批（含自动注入的路由入口等） */
+function ensureBatchesCoverArchitectFiles(batches, archFiles) {
+    if (batches.length === 0)
+        return;
+    const set = new Set(batches.flatMap(b => b.files));
+    for (const af of archFiles) {
+        if (set.has(af.path))
+            continue;
+        batches[batches.length - 1].files.push(af.path);
+        set.add(af.path);
+        console.warn(`[architect] batches 补充架构中的文件: ${af.path}`);
+    }
+    // 注入路由入口等后每批仍须 ≤3（与上文 LLM 分批约束一致）
+    const last = batches[batches.length - 1];
+    if (last && last.files.length > 3) {
+        const overflow = last.files.splice(3);
+        batches.push({ files: overflow, reason: '拆分：补充入口/路由挂接' });
+    }
+}
 /**
  * 确保每个 action:'create' 的新文件都有父文件引用它
  * 如果 architect 漏掉了父文件修改，自动注入
  */
-function ensureNewFilesIntegrated(output, plan, sandboxPath) {
+function ensureNewFilesIntegrated(output, plan, sandboxPath, projectContext) {
     const files = [...output.files];
     const crossFileRefs = [...(output.crossFileRefs ?? [])];
     const injectedParents = [];
@@ -301,52 +397,113 @@ function ensureNewFilesIntegrated(output, plan, sandboxPath) {
         const hasIntegrator = files.some(f => f.path !== newFile.path &&
             f.action === 'modify' &&
             f.detailedChange.toLowerCase().includes(newFile.path.split('/').pop()?.replace(/\.(jsx?|tsx?|vue)$/, '').toLowerCase() ?? ''));
-        if (hasReferrer || hasIntegrator) {
-            continue; // 已被集成，跳过
-        }
-        // 需要自动补充父文件
-        const parentPath = findLikelyParent(newFile.path, plan, files, sandboxPath);
-        if (parentPath) {
-            const newBaseName = newFile.path.split('/').pop()?.replace(/\.(jsx?|tsx?|vue)$/, '') ?? '';
-            // 检查父文件是否已在 files 列表中
-            const existingParent = files.find(f => f.path === parentPath);
-            if (existingParent) {
-                // 已有父文件条目，补充 detailedChange
-                existingParent.detailedChange += `\n【自动补充】必须 import 并使用新组件 ${newBaseName}（来自 ${newFile.path}）`;
+        if (!hasReferrer && !hasIntegrator) {
+            // 需要自动补充父文件（UI 侧 import）
+            const parentPath = findLikelyParent(newFile.path, plan, files, sandboxPath, projectContext);
+            if (parentPath) {
+                const newBaseName = newFile.path.split('/').pop()?.replace(/\.(jsx?|tsx?|vue)$/, '') ?? '';
+                // 检查父文件是否已在 files 列表中
+                const existingParent = files.find(f => f.path === parentPath);
+                if (existingParent) {
+                    // 已有父文件条目，补充 detailedChange
+                    existingParent.detailedChange += `\n【自动补充】必须 import 并使用新组件 ${newBaseName}（来自 ${newFile.path}）`;
+                }
+                else {
+                    // 注入新的父文件 modify 条目
+                    files.push({
+                        path: parentPath,
+                        action: 'modify',
+                        detailedChange: `【自动补充】import 并使用新组件 ${newBaseName}（来自 ${newFile.path}）。在合适的位置渲染该组件，使其对用户可见。`,
+                        dependencies: [newFile.path],
+                        exports: [],
+                        priority: newFile.priority + 1,
+                    });
+                }
+                // 补充 crossFileRef
+                crossFileRefs.push({
+                    from: parentPath,
+                    to: newFile.path,
+                    ref: `import ${newBaseName} from '${getRelativeImportPath(parentPath, newFile.path)}'`,
+                });
+                injectedParents.push(parentPath);
+                console.log(`[architect] 自动补充父文件集成: ${parentPath} → ${newFile.path}`);
             }
             else {
-                // 注入新的父文件 modify 条目
-                files.push({
-                    path: parentPath,
-                    action: 'modify',
-                    detailedChange: `【自动补充】import 并使用新组件 ${newBaseName}（来自 ${newFile.path}）。在合适的位置渲染该组件，使其对用户可见。`,
-                    dependencies: [newFile.path],
-                    exports: [],
-                    priority: newFile.priority + 1,
-                });
+                console.warn(`[architect] 无法为新文件 ${newFile.path} 找到合适的父文件，可能无法在页面上显示`);
             }
-            // 补充 crossFileRef
-            crossFileRefs.push({
-                from: parentPath,
-                to: newFile.path,
-                ref: `import ${newBaseName} from '${getRelativeImportPath(parentPath, newFile.path)}'`,
-            });
-            injectedParents.push(parentPath);
-            console.log(`[architect] 自动补充父文件集成: ${parentPath} → ${newFile.path}`);
+        }
+        injectRoutingIntegrationForNestedPages(projectContext, newFile, files, crossFileRefs, injectedParents, sandboxPath);
+    }
+    ensureRouteTableWiredToEntry(files, crossFileRefs, plan, sandboxPath, projectContext, injectedParents);
+    return { files, crossFileRefs, injectedParents };
+}
+/**
+ * 若方案含 router.jsx/tsx 等路由表文件，必须能从应用入口以相对 import 挂到树上；
+ * 否则孤儿检测会误提示「让 Profile 去 import router」。此处强制补充入口 modify + crossRef。
+ */
+function ensureRouteTableWiredToEntry(files, crossFileRefs, plan, sandboxPath, projectContext, injectedParents) {
+    const routeTables = new Set();
+    for (const p of plan.map(f => f.path)) {
+        if (isRouteTableModulePath(p))
+            routeTables.add(p.replace(/\\/g, '/'));
+    }
+    for (const f of files) {
+        if (isRouteTableModulePath(f.path))
+            routeTables.add(f.path.replace(/\\/g, '/'));
+    }
+    if (routeTables.size === 0)
+        return;
+    const entry = pickApplicationEntryForRouteTable(sandboxPath, projectContext);
+    if (!entry) {
+        console.warn('[architect] 方案含路由表文件但无法解析应用入口（main/App），跳过自动挂接');
+        return;
+    }
+    const normEntry = entry.replace(/\\/g, '/');
+    for (const rt of routeTables) {
+        const normRt = rt.replace(/\\/g, '/');
+        const linkedFromEntry = crossFileRefs.some(r => r.from.replace(/\\/g, '/') === normEntry && r.to.replace(/\\/g, '/') === normRt);
+        if (linkedFromEntry)
+            continue;
+        const base = normRt.split('/').pop()?.replace(/\.(jsx?|tsx?|js|ts)$/i, '') ?? 'router';
+        const note = `【自动补充-路由入口】在 ${normEntry} 中以相对路径 import 路由表 ${normRt}，并用其导出（或其中定义的 Routes）替换/接好现有 React Router 配置；` +
+            '禁止仅在 routes 下的页面组件中 import 该路由表文件。保持 HashRouter/BrowserRouter 与 path 与原版一致。';
+        const existingEntry = files.find(f => f.path.replace(/\\/g, '/') === normEntry);
+        if (existingEntry) {
+            if (!existingEntry.detailedChange.includes(normRt)) {
+                existingEntry.detailedChange += `\n${note}`;
+            }
         }
         else {
-            console.warn(`[architect] 无法为新文件 ${newFile.path} 找到合适的父文件，可能无法在页面上显示`);
+            files.push({
+                path: normEntry,
+                action: 'modify',
+                detailedChange: note,
+                dependencies: [normRt],
+                exports: [],
+                priority: 0,
+            });
+            injectedParents.push(normEntry);
         }
+        crossFileRefs.push({
+            from: normEntry,
+            to: normRt,
+            ref: `入口 ${normEntry} import 并挂载路由表 ${base}`,
+        });
+        console.log(`[architect] 自动补充路由表挂接: ${normEntry} → ${normRt}`);
     }
-    return { files, crossFileRefs, injectedParents };
 }
 /**
  * 为新文件查找最可能的父文件
  * 策略：同目录/父目录下的已有文件 > 路由文件 > 列表组件
  */
-function findLikelyParent(newFilePath, plan, archFiles, sandboxPath) {
+function findLikelyParent(newFilePath, plan, archFiles, sandboxPath, projectContext) {
     const newDir = newFilePath.split('/').slice(0, -1).join('/');
     const newBaseName = newFilePath.split('/').pop()?.replace(/\.(jsx?|tsx?|vue)$/, '') ?? '';
+    if (isRouteTableModulePath(newFilePath)) {
+        const entry = pickApplicationEntryForRouteTable(sandboxPath, projectContext);
+        if (entry)
+            return entry;
+    }
     // 候选池：plan 中的已有文件 + architect 中 action:'modify' 的文件
     const candidates = new Set();
     for (const f of plan)

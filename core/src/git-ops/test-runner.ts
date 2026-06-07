@@ -52,8 +52,8 @@ export class TestRunner {
   ) {}
 
   /**
-   * 执行完整的测试流程：lint → test → (失败时) 安装缺失依赖 / auto-fix → retry
-   * lint 作为非阻塞检查（warnings 不阻断），test 作为阻塞检查
+   * 执行完整的测试流程：lint → build（若配置）→ test → (失败时) 安装缺失依赖 / auto-fix → retry
+   * lint 作为非阻塞检查（warnings 不阻断）；build 与 test 为阻塞检查
    */
   async run(commands: { lint: string; test: string; build?: string }, maxFixAttempts: number = 3): Promise<TestRunResult> {
     const steps: TestStepResult[] = []

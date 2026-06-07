@@ -70,7 +70,13 @@ async function main() {
     createFileReadTool,
     createFileWriteTool,
     createShellTool,
+    resolveSandboxRepoAbs,
+    resolveProjectsDir,
+    getDefaultProjectId,
+    assertTheHandRequiredEnv,
   } = await import('./core/dist/index.js')
+
+  assertTheHandRequiredEnv()
 
   console.log(`\n${'='.repeat(60)}`)
   console.log(`TheHand Orchestrator Pipeline`)
@@ -78,13 +84,14 @@ async function main() {
   console.log(`${'='.repeat(60)}\n`)
 
   // 1. 创建依赖
+  const projectId = getDefaultProjectId()
   const llmClient = new LLMClient()
   const promptManager = new PromptManager(resolve(__dirname, 'prompts'))
-  const projectMemory = new ProjectMemory(resolve(__dirname, 'projects'))
+  const projectMemory = new ProjectMemory(resolveProjectsDir())
   const requirementMemory = new RequirementMemory()
 
   // 创建沙箱管理器（Docker 容器隔离）
-  const sandboxPath = resolve(__dirname, 'sandbox-repo', 'conduit-realworld-example-app')
+  const sandboxPath = resolveSandboxRepoAbs()
   const sandboxManager = new DockerSandboxManager(sandboxPath, {
     network: process.env.SANDBOX_NETWORK ?? 'none',
     memory: process.env.SANDBOX_MEMORY ?? '1g',
@@ -104,7 +111,7 @@ async function main() {
   // 创建 Skill Registry
   const skillRegistry = new SkillRegistry()
   skillRegistry.setLLMClient(llmClient)
-  await skillRegistry.discover(resolve(__dirname, 'projects/conduit'))
+  await skillRegistry.discover(join(resolveProjectsDir(), projectId))
 
   // 2. 创建 Orchestrator
   const orchestrator = new Orchestrator({
@@ -136,7 +143,7 @@ async function main() {
   let phaseStart = pipelineStart
   const phaseTimings = []
 
-  for await (const event of orchestrator.run(requirement, 'conduit')) {
+  for await (const event of orchestrator.run(requirement, projectId)) {
     const now = Date.now()
 
     // 记录每个阶段的耗时

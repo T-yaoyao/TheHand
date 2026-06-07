@@ -1,34 +1,15 @@
+import './load-env.js'
 import express from 'express'
 import cors from 'cors'
-import { readFileSync } from 'fs'
 import { resolve } from 'path'
+import { assertTheHandRequiredEnv } from '@thehand/core'
 import { initDB } from './db.js'
 import { requirementsRouter } from './routes/requirements.js'
 import { eventsRouter } from './routes/events.js'
 import { orchestratorRouter } from './routes/orchestrator.js'
 import { log } from './logger.js'
 
-// 加载 .env
-try {
-  const envPath = resolve(process.cwd(), '..', '.env')
-  const envContent = readFileSync(envPath, 'utf-8')
-  for (const line of envContent.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed || trimmed.startsWith('#')) continue
-    const idx = trimmed.indexOf('=')
-    if (idx === -1) continue
-    const key = trimmed.slice(0, idx).trim()
-    let val = trimmed.slice(idx + 1).trim()
-    // 去除行内注释（# 前至少一个空格）
-    const commentIdx = val.indexOf(' #')
-    if (commentIdx !== -1) val = val.slice(0, commentIdx).trim()
-    // 去除首尾引号
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1)
-    }
-    process.env[key] = val
-  }
-} catch {}
+assertTheHandRequiredEnv()
 
 const app = express()
 const PORT = process.env.PORT ?? 3001

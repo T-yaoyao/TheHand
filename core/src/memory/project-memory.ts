@@ -36,6 +36,8 @@ export class ProjectMemory {
       models: models ?? {},
       routes: routes ?? {},
       constraints: projectConfig.constraints ?? {},
+      keyFiles: projectConfig.keyFiles,
+      thehand: projectConfig.thehand,
     }
 
     this.cache.set(projectId, context)

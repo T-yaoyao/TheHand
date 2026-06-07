@@ -1,8 +1,9 @@
 import { readFile, readdir, stat } from 'fs/promises'
 import { join, resolve, relative } from 'path'
 import type { FilePlan, ProjectContext, ChangeBatch, FileInterface, ArchitectFileAnalysis, CrossFileRef } from '../types.js'
-import type { LLMClient, ToolDefinition, Message } from '../llm/llm-client.js'
+import type { LLMClient, ToolDefinition, Message, ToolCall, LLMChatOptions } from '../llm/llm-client.js'
 import type { PromptManager } from '../llm/prompt-manager.js'
+import { formatL1RecallSection } from '../utils/recall-l1.js'
 
 export interface CodeFileOutput {
   path: string
@@ -28,7 +29,7 @@ export const CODING_TOOLS: ToolDefinition[] = [
               type: 'object',
               properties: {
                 path: { type: 'string', description: '相对于项目根目录的文件路径' },
-                content: { type: 'string', description: '文件完整源码，删除的文件填 __DELETE__' },
+                content: { type: 'string', description: '完整最终源码（非 diff）。须以上下文「原始内容」为基底做最小编辑；禁止凭记忆整文件重写导致漏 hooks/import。删除填 __DELETE__' },
                 summary: { type: 'string', description: '一句话描述本次改动' },
               },
               required: ['path', 'content', 'summary'],
@@ -40,6 +41,50 @@ export const CODING_TOOLS: ToolDefinition[] = [
     },
   },
 ]
+
+/** 注入用户消息，强化「在原始全文上编辑」而非「默写整文件」 */
+const CODING_USER_EDIT_STRATEGY = `
+
+## 编辑策略（必读）
+- 下方「各文件原始内容」中的代码块是**唯一正确基底**；提交时仍须给出**完整**文件正文，但应等于「在该基底上做最小编辑」后的结果。
+- 禁止凭记忆/示例另写一版，尤其禁止丢掉原有的 state、副作用、数据请求与未在方案中要求改动的 import。
+`
+
+/**
+ * 从 LLM 返回的 tool_calls 中提取 submit_files.files（兼容多条 tool、arguments 已为对象等情况）
+ */
+function extractSubmitFilesFromToolCalls(toolCalls: ToolCall[] | null): CodeFileOutput[] | null {
+  if (!toolCalls?.length) return null
+  for (const tc of toolCalls) {
+    if (tc.name !== 'submit_files') continue
+    const args = tc.arguments as Record<string, unknown> | null
+    if (!args || typeof args !== 'object') continue
+    const files = args.files
+    if (!Array.isArray(files) || files.length === 0) continue
+    const out: CodeFileOutput[] = []
+    for (const item of files) {
+      if (!item || typeof item !== 'object') continue
+      const rec = item as Record<string, unknown>
+      if (typeof rec.path !== 'string' || typeof rec.content !== 'string') continue
+      const summary = typeof rec.summary === 'string' ? rec.summary : ''
+      out.push({ path: rec.path, content: rec.content, summary })
+    }
+    if (out.length > 0) return out
+  }
+  return null
+}
+
+function codingLlmOptions(agent: 'coding' | 'coding-batch'): LLMChatOptions {
+  const opts: LLMChatOptions = {
+    tools: CODING_TOOLS,
+    agent,
+    maxTokens: 16384,
+  }
+  if (process.env.THEHAND_DISABLE_FORCE_TOOL_CHOICE !== '1') {
+    opts.requireFunctionCallName = 'submit_files'
+  }
+  return opts
+}
 
 /**
  * 编码 Agent 定义（供 AgentRunner 等场景使用）
@@ -99,12 +144,18 @@ export async function runCoding(
     fileContexts.push(`### ${file.path}\n${file.changeDescription ? `操作: ${file.changeDescription}` : ''}\n\`\`\`\n${originalContent}\n\`\`\``)
   }
 
-  // 读取关键上下文文件（main.jsx, router 等）
-  const contextFiles = await readContextFiles(sandboxPath)
+  // 读取关键上下文文件（路由入口、App、package.json 等，可由 project.json thehand.readContextCandidates 追加）
+  const contextFiles = await readContextFiles(sandboxPath, projectContext)
   let contextHint = ''
   if (contextFiles.length > 0) {
     contextHint = '\n\n## 关键上下文文件\n' + contextFiles.join('\n\n')
   }
+
+  const l1Section = await formatL1RecallSection(
+    sandboxPath,
+    projectContext,
+    plan.map(f => f.path),
+  )
 
   // 构建错误反馈（重试时）
   let errorHint = ''
@@ -122,7 +173,7 @@ export async function runCoding(
   }
 
   const userMessage = `## 技术方案（需要生成的文件）\n${plan.map(f => `- ${f.path}: ${f.changeDescription}`).join('\n')}
-
+${CODING_USER_EDIT_STRATEGY}
 ## 项目目录结构
 \`\`\`
 ${projectTree}
@@ -130,7 +181,7 @@ ${projectTree}
 
 ## 各文件原始内容
 ${fileContexts.join('\n\n')}
-${contextHint}${constraintsHint}${errorHint}
+${contextHint}${l1Section}${constraintsHint}${errorHint}
 
 请输出所有文件的修改结果，JSON 数组格式。`
 
@@ -140,19 +191,12 @@ ${contextHint}${constraintsHint}${errorHint}
     { role: 'user', content: userMessage },
   ]
 
-  const response = await llmClient.chat(messages, {
-    tools: CODING_TOOLS,
-    agent: 'coding',
-    maxTokens: 16384,
-  })
+  const response = await llmClient.chat(messages, codingLlmOptions('coding'))
 
-  // 优先从 toolCalls 直接取结果
-  if (response.toolCalls && response.toolCalls.length > 0) {
-    const tc = response.toolCalls[0]
-    if (tc.name === 'submit_files' && typeof tc.arguments === 'object' && tc.arguments !== null && tc.arguments.files) {
-      console.log('[coding] 使用 function calling 直接返回文件列表')
-      return tc.arguments.files as CodeFileOutput[]
-    }
+  const fromTools = extractSubmitFilesFromToolCalls(response.toolCalls)
+  if (fromTools) {
+    console.log('[coding] 使用 function calling 直接返回文件列表')
+    return fromTools
   }
 
   // Fallback：旧的解析逻辑兜底
@@ -265,13 +309,19 @@ export async function runCodingBatch(
     }
   }
 
+  const l1Section = await formatL1RecallSection(
+    sandboxPath,
+    projectContext,
+    batch.files,
+  )
+
   const userMessage = `## 本批次需要生成的文件
 ${batch.files.join(', ')}
 ${globalContextHint}
-
+${CODING_USER_EDIT_STRATEGY}
 ## 各文件原始内容和改动指令
 ${fileContexts.join('\n\n')}
-${generatedSummaryHint}${crossRefHint}${constraintsHint}${errorHint ? '\n\n' + errorHint : ''}
+${generatedSummaryHint}${crossRefHint}${l1Section}${constraintsHint}${errorHint ? '\n\n' + errorHint : ''}
 
 请输出本批次所有文件的修改结果，JSON 数组格式。`
 
@@ -280,19 +330,12 @@ ${generatedSummaryHint}${crossRefHint}${constraintsHint}${errorHint ? '\n\n' + e
     { role: 'user', content: userMessage },
   ]
 
-  const response = await llmClient.chat(messages, {
-    tools: CODING_TOOLS,
-    agent: 'coding-batch',
-    maxTokens: 16384,
-  })
+  const response = await llmClient.chat(messages, codingLlmOptions('coding-batch'))
 
-  // 优先从 toolCalls 直接取结果
-  if (response.toolCalls && response.toolCalls.length > 0) {
-    const tc = response.toolCalls[0]
-    if (tc.name === 'submit_files' && typeof tc.arguments === 'object' && tc.arguments !== null && tc.arguments.files) {
-      console.log(`[coding-batch] 使用 function calling 直接返回文件列表 (batch: ${batch.files.join(', ')})`)
-      return tc.arguments.files as CodeFileOutput[]
-    }
+  const fromTools = extractSubmitFilesFromToolCalls(response.toolCalls)
+  if (fromTools) {
+    console.log(`[coding-batch] 使用 function calling 直接返回文件列表 (batch: ${batch.files.join(', ')})`)
+    return fromTools
   }
 
   // Fallback
@@ -482,11 +525,11 @@ async function getProjectTree(dirPath: string, maxDepth: number, currentDepth = 
 }
 
 /**
- * 读取关键上下文文件（main.jsx, router, package.json 等）
+ * 读取关键上下文文件（可由 thehand.readContextCandidates 追加候选路径）
  */
-async function readContextFiles(sandboxPath: string): Promise<string[]> {
+async function readContextFiles(sandboxPath: string, projectContext?: ProjectContext): Promise<string[]> {
   const contextFiles: string[] = []
-  const candidates = [
+  const DEFAULT_CANDIDATES = [
     'frontend/src/main.jsx',
     'frontend/src/main.tsx',
     'frontend/src/router.jsx',
@@ -496,6 +539,8 @@ async function readContextFiles(sandboxPath: string): Promise<string[]> {
     'frontend/package.json',
     'package.json',
   ]
+  const extra = projectContext?.thehand?.readContextCandidates ?? []
+  const candidates = [...new Set([...DEFAULT_CANDIDATES, ...extra])]
 
   for (const file of candidates) {
     try {

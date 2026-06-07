@@ -50,10 +50,23 @@ export class AgentRunner {
         const finalToolDefs = toolDefs.length > 0 ? toolDefs : undefined;
         while (rounds < maxRounds) {
             rounds++;
-            const response = await this.llmClient.chat(messages, {
+            const chatOptions = {
                 tools: finalToolDefs,
                 agent: agent.name,
-            });
+            };
+            // 与 coding 一致：强制以 outputTool 交卷，减少正文 JSON 解析失败。
+            // - 仅注册 outputTool（无 file-read 等）时：每轮都强制（architect）。
+            // - 另有执行类工具时：只在最后一轮强制，避免挡掉中间的 file-read/shell。
+            if (agent.outputTool &&
+                finalToolDefs &&
+                finalToolDefs.length > 0 &&
+                process.env.THEHAND_DISABLE_FORCE_TOOL_CHOICE !== '1') {
+                const onlyOutputTool = finalToolDefs.length === 1 && finalToolDefs[0].function.name === agent.outputTool.function.name;
+                if (onlyOutputTool || rounds === maxRounds) {
+                    chatOptions.requireFunctionCallName = agent.outputTool.function.name;
+                }
+            }
+            const response = await this.llmClient.chat(messages, chatOptions);
             totalInputTokens += response.usage.inputTokens;
             totalOutputTokens += response.usage.outputTokens;
             console.log(`[agent:${agent.name}] round=${rounds} hasToolCalls=${!!response.toolCalls} contentLen=${response.content?.length ?? 0}`);

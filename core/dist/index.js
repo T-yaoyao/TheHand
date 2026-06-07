@@ -2,7 +2,7 @@ export { Orchestrator } from './orchestrator/orchestrator.js';
 export { AgentRunner } from './agents/agent-runner.js';
 export { SkillRegistry } from './skill-registry/skill-registry.js';
 export { ToolPipeline } from './tools/tool-pipeline.js';
-export { LLMClient } from './llm/llm-client.js';
+export { LLMClient, normalizeAssistantToolArguments } from './llm/llm-client.js';
 export { PromptManager } from './llm/prompt-manager.js';
 export { RepoManager } from './git-ops/repo-manager.js';
 export { SandboxManager } from './git-ops/sandbox.js';
@@ -24,4 +24,6 @@ export { NaturalSummaryGenerator } from './utils/natural-summary-generator.js';
 export { DiffSafetyChecker } from './utils/diff-safety-checker.js';
 export { Tracer, globalTracer } from './utils/tracer.js';
 export { validateRequirement, validationErrorsToQuestions } from './utils/requirement-validator.js';
+export { formatL1RecallSection, listSandboxSourceRelPaths } from './utils/recall-l1.js';
+export { getTheHandRoot, resolveProjectsDir, resolveSandboxRepoAbs, getDefaultProjectId, assertTheHandRequiredEnv, } from './config/thehand-paths.js';
 //# sourceMappingURL=index.js.map

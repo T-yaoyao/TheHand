@@ -152,6 +152,9 @@ export interface ProjectContext {
     models: Record<string, ModelDefinition>;
     routes: Record<string, Record<string, string>>;
     constraints?: Record<string, string>;
+    /** 来自 project.json，供方案/Agent 引用关键路径清单 */
+    keyFiles?: Record<string, string[]>;
+    thehand?: TheHandProjectConfig;
 }
 export interface TechStack {
     frontend: string;
@@ -165,6 +168,38 @@ export interface ProjectStructure {
     models: string;
     routes: string;
     components: string;
+}
+/** project.json 中可选的 thehand 块：驱动路由注入、L1 召回、孤儿检测跳过、编码上下文候选 */
+export interface TheHandRoutingIntegration {
+    /** 为 false 时关闭本块逻辑 */
+    enabled?: boolean;
+    /** 路由表入口文件（自上而下优先选用磁盘上存在的路径） */
+    routeEntryFiles?: string[];
+    /** 命中时表示「需在 routeEntry 中注册」的新建页面 glob（支持 * 与 **） */
+    nestedNewPageGlob?: string;
+    /** 从 nestedNewPageGlob 中排除（如父壳 Profile.jsx） */
+    nestedNewPageExcludeGlobs?: string[];
+    /** 注入到 architect 的补充说明：与哪些已有子页同级等 */
+    injectSiblingRouteHint?: string;
+    /** 与 NavLink / 嵌套路由 path 对齐的提示（文件路径或说明文字） */
+    nestedRouteParentHint?: string;
+}
+export interface TheHandRecallL1 {
+    /** 作为「入口」参与 BFS 的候选文件（相对沙箱根） */
+    entryCandidates?: string[];
+    /** 浅层扫描路由文件的目录（相对沙箱根），如 frontend/src/routes */
+    shallowRoutesDir?: string;
+}
+export interface TheHandOrphanGuard {
+    /** 命中 glob 时跳过「孤儿 import」检测（如 Vite 入口） */
+    entrySkipGlobs?: string[];
+}
+export interface TheHandProjectConfig {
+    routingIntegration?: TheHandRoutingIntegration;
+    recallL1?: TheHandRecallL1;
+    orphanGuard?: TheHandOrphanGuard;
+    /** 追加到默认列表之后去重，供编码阶段读取关键上下文（须为沙箱内已存在的路径） */
+    readContextCandidates?: string[];
 }
 export interface ProjectCommands {
     lint: string;

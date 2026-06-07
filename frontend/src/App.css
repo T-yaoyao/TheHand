@@ -79,6 +79,11 @@
   border-bottom: 1px solid var(--border);
 }
 
+.sidebar-compose .btn-primary {
+  width: 100%;
+  margin-top: 8px;
+}
+
 .label {
   display: block;
   font-size: 10px;
@@ -116,16 +121,16 @@
 
 /* ============================================
    BUTTONS — Devin-style hierarchy
-   Primary: tall (42px), prominent
-   Secondary: medium (34px), subtle
+   Primary / secondary / danger 同一高度，便于横向对齐
    Ghost: inline, minimal
    ============================================ */
 
 .btn-primary {
-  width: 100%;
-  margin-top: 8px;
+  margin-top: 0;
+  width: auto;
+  min-width: 0;
   padding: 0 20px;
-  height: 42px;
+  height: 40px;
   background: var(--accent);
   color: var(--bg);
   border: none;
@@ -164,7 +169,7 @@
 
 .btn-secondary {
   padding: 0 16px;
-  height: 34px;
+  height: 40px;
   background: transparent;
   color: var(--text);
   border: 1px solid var(--border);
@@ -186,7 +191,7 @@
 
 .btn-danger {
   padding: 0 16px;
-  height: 34px;
+  height: 40px;
   background: transparent;
   color: var(--error);
   border: 1px solid rgba(229, 69, 69, 0.3);
@@ -686,13 +691,14 @@
 .chat-send-btn {
   width: auto;
   margin-top: 0;
-  height: 42px;
+  height: 40px;
   padding: 0 24px;
   flex-shrink: 0;
 }
 
 .modal-confirm-btn {
   width: auto;
+  margin-top: 0;
 }
 
 .chat-hint {
@@ -1067,9 +1073,11 @@
   border-bottom: 1px solid var(--border);
 }
 
-/* Plan actions — prominent buttons */
+/* Plan actions — 与 modal 一致：横向 flex + 垂直居中 + 同高按钮 */
 .plan-actions {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 10px;
   padding: 20px 16px;
   border-top: 1px solid var(--border);
@@ -1077,13 +1085,14 @@
 
 .plan-actions .btn-primary {
   width: auto;
-  height: 42px;
+  margin-top: 0;
+  height: 40px;
   padding: 0 28px;
   font-size: 14px;
 }
 
 .plan-actions .btn-secondary {
-  height: 42px;
+  height: 40px;
   padding: 0 24px;
   font-size: 14px;
 }
@@ -1130,23 +1139,20 @@
   border-bottom: 1px solid rgba(229, 69, 69, 0.15);
 }
 
-.error-banner button {
-  background: rgba(229, 69, 69, 0.12);
+.error-banner .error-banner-retry {
+  flex-shrink: 0;
+  align-self: center;
+  margin-top: 0;
   color: var(--error);
-  border: 1px solid rgba(229, 69, 69, 0.25);
-  padding: 0 12px;
-  height: 28px;
-  border-radius: var(--radius);
-  cursor: pointer;
-  font-size: 11px;
+  border-color: rgba(229, 69, 69, 0.35);
+  background: rgba(229, 69, 69, 0.08);
   font-weight: 500;
-  transition: all 0.2s;
-  display: inline-flex;
-  align-items: center;
 }
 
-.error-banner button:hover {
+.error-banner .error-banner-retry:hover:not(:disabled) {
   background: rgba(229, 69, 69, 0.2);
+  border-color: rgba(229, 69, 69, 0.45);
+  color: var(--error);
 }
 
 /* === Modal === */
@@ -1194,13 +1200,16 @@
 
 .modal-actions {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
+  gap: 10px;
   position: relative;
 }
 
 .modal-actions .btn-primary {
   width: auto;
+  margin-top: 0;
   height: 40px;
   padding: 0 24px;
 }

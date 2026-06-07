@@ -367,7 +367,13 @@ export function App() {
         {errorBanner && (
           <div className="error-banner">
             {errorBanner}
-            <button type="button" onClick={() => { setErrorBanner(null); refreshList() }}>重试</button>
+            <button
+              type="button"
+              className="btn-secondary btn-sm error-banner-retry"
+              onClick={() => { setErrorBanner(null); refreshList() }}
+            >
+              重试
+            </button>
           </div>
         )}
 

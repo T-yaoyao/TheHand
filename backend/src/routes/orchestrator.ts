@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { queryOne, queryAll } from '../db.js'
+import { getDefaultProjectId } from '@thehand/core'
 import { isOrchestratorRunning, runOrchestratorForRequirement } from '../orchestrator-runner.js'
 import { getActiveConnectionCount } from './events.js'
 import { log } from '../logger.js'
@@ -12,7 +13,7 @@ export const orchestratorRouter = Router()
  */
 orchestratorRouter.post('/run/:id', async (req: Request, res: Response) => {
   const requirementId = req.params.id as string
-  const { projectId = 'conduit' } = req.body ?? {}
+  const { projectId = getDefaultProjectId() } = req.body ?? {}
 
   const existing = queryOne('SELECT id FROM requirements WHERE id = ?', [requirementId])
   if (!existing) {

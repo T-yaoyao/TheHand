@@ -33,7 +33,15 @@ import { RiskAssessor } from '../utils/risk-assessor.js'
 import { NaturalSummaryGenerator } from '../utils/natural-summary-generator.js'
 import { DiffSafetyChecker } from '../utils/diff-safety-checker.js'
 import { globalTracer } from '../utils/tracer.js'
+import { detectCodingRegression, formatRegressionRetryHint } from '../utils/coding-regression-guard.js'
 import { validateRequirement, validationErrorsToQuestions } from '../utils/requirement-validator.js'
+import { loadSandboxSourceContents, sandboxIndexImportsComponent, skipOrphanImportIntegrationCheck, sourceFileImportsTargetModule } from '../utils/component-sandbox-import.js'
+import { isRouteTableModulePath, pickApplicationEntryForRouteTable, collectRouteIntegrationContextPaths } from '../utils/route-wiring-entry.js'
+import { findOutletNavRouteViolations } from '../utils/outlet-nav-route-guard.js'
+import { findUnresolvedRelativeImportsInFileMap } from '../utils/relative-import-resolve-guard.js'
+import { enrichPlanWithIntegrationEntryFiles } from '../utils/plan-integration-enrich.js'
+import { sanitizePhantomRouteTablesAgainstEntryTopology } from '../utils/routing-entry-topology.js'
+import { inferRouteEntryContextFromRequirementAndPlan } from '../utils/plan-route-context-infer.js'
 
 export interface SandboxManagerLike {
   create(id?: string): Promise<Sandbox>
@@ -361,8 +369,25 @@ export class Orchestrator {
 
         if (planResult.status === 'success' && planResult.output) {
           const parsed = this.parsePlan(planResult.output)
-          if (parsed.length > 0) {
-            plan = await this.resolvePlanToExistingFiles(parsed, sandbox.path)
+          let includeRouteEntryContext = parsed.includeRouteEntryContext
+          const parsedFiles = parsed.files
+          if (parsedFiles.length > 0) {
+            if (
+              !includeRouteEntryContext &&
+              inferRouteEntryContextFromRequirementAndPlan(
+                requirement.structuredRequirement,
+                parsedFiles,
+                requirement.pmInput,
+              )
+            ) {
+              includeRouteEntryContext = true
+              console.log(
+                '[planning] 嵌套路由/Tab 语义推断：启用 includeRouteEntryContext，首轮并入入口与 readContextCandidates',
+              )
+            }
+            plan = await this.resolvePlanToExistingFiles(parsedFiles, sandbox.path)
+            plan = sanitizePhantomRouteTablesAgainstEntryTopology(plan, sandbox.path, projectContext)
+            plan = enrichPlanWithIntegrationEntryFiles(plan, sandbox.path, projectContext, includeRouteEntryContext)
             break
           }
         }
@@ -470,6 +495,8 @@ export class Orchestrator {
       : null
 
     const MAX_RETRIES = 3
+    /** 上轮「整文件退化」检测失败时注入到下一轮 coding 的说明（prompt 内已含原版，此处强调策略） */
+    let codingRegressionHint = ''
     const codeErrors: string[] = []
     const { writeFile, mkdir, rm } = await import('fs/promises')
     const commands = projectContext.commands?.lint ? projectContext.commands : { lint: 'npm run lint', test: 'npm test', build: 'npm run build' }
@@ -477,6 +504,24 @@ export class Orchestrator {
     let codeOutputs: { path: string; content: string; summary: string }[] = []
     let previousOutputs: { path: string; content: string; summary: string }[] = []
     let finalFileValidationSummary: FileValidationSummary | null = null
+
+    /** 静态校验失败时须纳入后续轮次 plan 的路径（否则报错在 main.jsx 但方案只有子页，重试永远无法改到入口文件） */
+    const staticGuardInjectPaths = new Set<string>()
+    const mergePlanWithInjections = (base: FilePlan[]): FilePlan[] => {
+      const norm = (p: string) => p.replace(/\\/g, '/')
+      const byPath = new Map<string, FilePlan>()
+      for (const f of base) {
+        const key = norm(f.path)
+        byPath.set(key, { ...f, path: key })
+      }
+      const injectDesc =
+        '【TheHand 编排器】须修正上一轮静态校验指出的问题（如无法解析的相对 import、或 Tab 与路由表不一致）；请对照沙箱磁盘**真实路径**做最小改动，勿臆造目录（例如 Conduit 须 `import App from "./App"` 而非 `./components/App`）。'
+      for (const p of staticGuardInjectPaths) {
+        if (byPath.has(p)) continue
+        byPath.set(p, { path: p, changeDescription: injectDesc, priority: 999_000 })
+      }
+      return [...byPath.values()].sort((a, b) => a.priority - b.priority)
+    }
 
     for (let codeAttempt = 1; codeAttempt <= MAX_RETRIES; codeAttempt++) {
       yield { type: 'executing', phase: `coding (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 30 }
@@ -495,10 +540,11 @@ export class Orchestrator {
         const skillOutputs = await skill.execute(requirement.structuredRequirement!, projectContext)
         codeOutputs = skillOutputs.map(o => ({ path: o.path, content: o.content, summary: o.summary }))
       } else {
-        const planFiles = requirement.plan ?? []
+        const planFiles = mergePlanWithInjections(requirement.plan ?? [])
         const lastTestError = codeErrors.length > 0 ? codeErrors[codeErrors.length - 1] : undefined
         const errorHintCombined = [
           codingHint || '',
+          codingRegressionHint,
           lastTestError ? `\n\n## 上轮测试失败\n${lastTestError}\n请分析错误根因并修正代码。` : '',
           codeAttempt > 1 && previousOutputs.length > 0
             ? '\n\n## 上轮生成的代码（仅供参考）\n' + previousOutputs.map(f => `- ${f.path}: ${f.summary}`).join('\n')
@@ -594,7 +640,7 @@ export class Orchestrator {
       // 从"静默兜底"升级为"三级分级处理"，彻底杜绝静默失败
       // ──────────────────────────────────────────────────────────────
       yield { type: 'executing', phase: 'validating-files', progress: 50 }
-      const planFilesFull = requirement.plan ?? []
+      const planFilesFull = mergePlanWithInjections(requirement.plan ?? [])
       const { readFile } = await import('fs/promises')
 
       // ── 辅助判定函数 ──
@@ -712,6 +758,65 @@ export class Orchestrator {
         continue
       }
 
+      // ── 4.5 整文件退化检测（写入前）：体量骤减 / hooks 丢失等 → 带说明重试，不依赖测试才暴露
+      const SRC_FOR_REGRESSION = /\.(jsx?|tsx|vue)$/
+      if (process.env.THEHAND_DISABLE_REGRESSION_GUARD !== '1') {
+        const regressions: { path: string; reasons: string[] }[] = []
+        for (const planFile of planFilesFull) {
+          if (!SRC_FOR_REGRESSION.test(planFile.path)) continue
+          const out = fileMap.get(planFile.path)
+          if (!out?.content || out.content === '__DELETE__') continue
+          let originalOnDisk = ''
+          try {
+            originalOnDisk = await readFile(join(sandbox.path, planFile.path), 'utf-8')
+          } catch {
+            continue
+          }
+          const { suspicious, reasons } = detectCodingRegression(originalOnDisk, out.content)
+          if (suspicious && reasons.length > 0) {
+            regressions.push({ path: planFile.path, reasons })
+          }
+        }
+        if (regressions.length > 0) {
+          codingRegressionHint = formatRegressionRetryHint(regressions)
+          const err = `编码退化检测：疑似整文件凭记忆重写、丢失 hooks/依赖：${regressions.map(r => r.path).join(', ')}`
+          codeErrors.push(`第${codeAttempt}轮: ${err}`)
+          yield {
+            type: 'executing',
+            phase: `regression-guard: ${regressions.length} 个文件需基于原版最小修改`,
+            progress: 53,
+            warnings: regressions.flatMap(r => r.reasons.map(reason => `${r.path}: ${reason}`)),
+          }
+          if (codeAttempt === MAX_RETRIES) {
+            const detailedError = `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`
+            yield {
+              type: 'failed',
+              requirement,
+              error: detailedError,
+              userMessage:
+                `生成代码与磁盘原版相比疑似大段丢失（常见于「整文件重写」漏掉 useEffect/useState 等）。涉及：${regressions.map(r => r.path).join(', ')}。请重试需求描述，或设置 THEHAND_DISABLE_REGRESSION_GUARD=1 跳过此检测（不推荐）。`,
+            }
+            requirement.status = 'failed'
+            await requirementMemory.saveRequirement(requirement)
+            await requirementMemory.saveLesson({
+              id: crypto.randomUUID(),
+              projectId,
+              requirementId: requirement.id,
+              phase: 'coding',
+              filePath: regressions[0]?.path ?? null,
+              errorSummary: err,
+              errorDetail: detailedError,
+              fixHint: codingRegressionHint,
+              resolved: false,
+              createdAt: new Date(),
+            })
+            return
+          }
+          continue
+        }
+      }
+      codingRegressionHint = ''
+
       // ── 5. 有兜底文件 → 推送黄色告警事件 ──
       if (fallbackOriginal.length > 0) {
         yield {
@@ -723,8 +828,9 @@ export class Orchestrator {
       }
 
       // ── 5.5 组件文件集成校验（阻断式，触发重试） ──
-      // 检查所有生成的组件文件（不论新建还是修改）是否被路由/页面文件真正 import
-      // 跳过样式/资源文件（它们由组件内部 import）
+      // 职责：兜底「真·新建组件未被相对 import」；与方案 Agent 分工——plan 须把新建挂载点写进 files；
+      // 此处须不误伤桶结构（index re-export + Foo/Foo.jsx）、Vite 入口 main 等（见 component-sandbox-import、skipOrphanImportIntegrationCheck）。
+      // 先查本轮 fileMap 互 import；若无，再扫沙箱内源码。跳过样式/资源文件。
       const COMPONENT_EXTS = /\.(jsx?|tsx|vue)$/
       const STYLE_ASSET_EXTS = /\.(css|scss|less|svg|png|jpg|json)$/
       const BARREL_EXTS = /\/index\.(jsx?|tsx|js|ts)$/
@@ -733,45 +839,78 @@ export class Orchestrator {
         if (STYLE_ASSET_EXTS.test(f.path)) return false
         if (!COMPONENT_EXTS.test(f.path)) return false
         if (BARREL_EXTS.test(f.path)) return false // index.js barrel export 不参与检测
+        if (skipOrphanImportIntegrationCheck(f.path, projectContext.thehand?.orphanGuard)) return false // Vite/React 入口不会被 JS import
         // 只检测被生成了的文件
         return fileMap.has(f.path)
       })
 
       if (generatedComponentFiles.length > 0) {
+        let sandboxSourceIndex: Map<string, string> | undefined
+
         const orphanFiles: string[] = []
         const orphanHints: string[] = []
+        const knownFromBatch = new Set(fileMap.keys())
         for (const nf of generatedComponentFiles) {
           const baseName = nf.path.split('/').pop()?.replace(/\.(jsx?|tsx|vue)$/, '') ?? ''
           if (!baseName) continue
 
-          // 检查是否有其他生成文件（排除自身、barrel export、样式文件）真正 import 了这个组件
-          const isImported = Array.from(fileMap.values()).some(other => {
+          // 先：本轮产出文件之间是否互相 import（相对路径解析，避免子串误匹配）
+          let isImported = Array.from(fileMap.values()).some(other => {
             if (other.path === nf.path) return false
             if (BARREL_EXTS.test(other.path)) return false // barrel export 不算真正使用
             if (STYLE_ASSET_EXTS.test(other.path)) return false
-            const content = other.content
-            return new RegExp(`from\\s+['"][^'"]*${baseName}['"]`).test(content) ||
-                   content.includes(`import('${nf.path}')`)
+            return sourceFileImportsTargetModule(other.content, other.path, nf.path, knownFromBatch)
           })
+
+          // 再：沙箱内已有源码（含本轮未改动的父文件）是否已 import
+          if (!isImported) {
+            if (!sandboxSourceIndex) {
+              sandboxSourceIndex = await loadSandboxSourceContents(
+                sandbox.path,
+                projectContext.structure,
+              )
+              // 本轮 LLM 产出尚未写入磁盘，用 fileMap 覆盖/补全索引，避免漏检「仅存在于本轮的 import」
+              for (const o of fileMap.values()) {
+                if (!o.path || o.content === '__DELETE__') continue
+                if (!/\.(jsx?|tsx|vue|mjs|cjs)$/.test(o.path)) continue
+                sandboxSourceIndex.set(o.path.replace(/\\/g, '/'), o.content)
+              }
+            }
+            isImported = sandboxIndexImportsComponent(sandboxSourceIndex, nf.path, baseName)
+          }
 
           if (!isImported) {
             orphanFiles.push(nf.path)
-            // 推断最可能的父文件
-            const nfDir = nf.path.split('/').slice(0, -1).join('/')
-            const likelyParent = planFilesFull.find(f => {
-              if (f.path === nf.path) return false
-              if (STYLE_ASSET_EXTS.test(f.path)) return false
-              if (BARREL_EXTS.test(f.path)) return false
-              const fDir = f.path.split('/').slice(0, -1).join('/')
-              if (fDir === nfDir) return false
-              return f.path.includes('/routes/') || f.path.includes('List') ||
-                     f.path.includes('Section') || f.path.includes('Home') ||
-                     f.path.includes('Page') || f.path.includes('View')
-            })
-            if (likelyParent) {
-              orphanHints.push(`${nf.path} 未被 import，必须同时修改 ${likelyParent.path} 来 import 并使用它`)
+            const normPath = nf.path.replace(/\\/g, '/')
+            // 路由表 router.jsx 等应由 main/App 入口 import，勿用「routes 下页面」当父组件推断
+            if (isRouteTableModulePath(normPath)) {
+              const entry = pickApplicationEntryForRouteTable(sandbox.path, projectContext)
+              if (entry) {
+                orphanHints.push(
+                  `${nf.path} 未被相对 import。应在应用入口 ${entry} 中 import 并挂接该路由表（例如将 main 内联 <Routes> 改为使用 router 模块），勿仅在 routes 下的页面组件中 import。`,
+                )
+              } else {
+                orphanHints.push(
+                  `${nf.path} 未被任何文件 import。请在应用入口（如 frontend/src/main.jsx）中 import 并挂载该路由表。`,
+                )
+              }
             } else {
-              orphanHints.push(`${nf.path} 未被任何文件 import，必须修改父组件来 import 并使用它`)
+              const nfDir = normPath.split('/').slice(0, -1).join('/')
+              const likelyParent = planFilesFull.find(f => {
+                if (f.path === nf.path) return false
+                if (STYLE_ASSET_EXTS.test(f.path)) return false
+                if (BARREL_EXTS.test(f.path)) return false
+                const fDir = f.path.split('/').slice(0, -1).join('/')
+                if (fDir === nfDir) return false
+                return f.path.includes('/routes/') || f.path.includes('List') ||
+                       f.path.includes('Section') || f.path.includes('Home') ||
+                       f.path.includes('Page') || f.path.includes('View')
+              })
+              if (likelyParent) {
+                orphanHints.push(`${nf.path} 未被 import，必须同时修改 ${likelyParent.path} 来 import 并使用它`)
+              } else {
+                orphanHints.push(`${nf.path} 未被任何文件 import，必须修改父组件来 import 并使用它`)
+              }
             }
           }
         }
@@ -805,6 +944,111 @@ export class Orchestrator {
             })
             return
           }
+          continue
+        }
+      }
+
+      // ── 5.6 含 <Outlet> 的布局里相对 Tab（NavItem url / NavLink to）须在路由表中有对应 path，否则运行期 404
+      if (process.env.THEHAND_DISABLE_OUTLET_NAV_GUARD !== '1') {
+        const outletViolations = await findOutletNavRouteViolations(
+          sandbox.path,
+          projectContext,
+          planFilesFull,
+          fileMap,
+        )
+        if (outletViolations.length > 0) {
+          const hints = outletViolations.map(v => v.message)
+          const err = `嵌套路由未注册（Tab 与路由表不一致）:\n${hints.join('\n')}`
+          codeErrors.push(`第${codeAttempt}轮: ${err}`)
+          yield {
+            type: 'executing',
+            phase: `outlet-nav-route: ${outletViolations.length} 处 Tab 缺少对应 Route`,
+            progress: 57,
+            warnings: hints,
+          }
+          if (codeAttempt === MAX_RETRIES) {
+            const detailedError = `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`
+            yield {
+              type: 'failed',
+              requirement,
+              error: detailedError,
+              userMessage: `导航与路由表不一致：${outletViolations.map(v => `「${v.segment}」@${v.layoutPath}`).join('；')}。请在路由入口（如 main.jsx）为上述路径增加嵌套 <Route path="..." />。`,
+            }
+            requirement.status = 'failed'
+            await requirementMemory.saveRequirement(requirement)
+            await requirementMemory.saveLesson({
+              id: crypto.randomUUID(),
+              projectId,
+              requirementId: requirement.id,
+              phase: 'coding',
+              filePath: outletViolations[0]?.layoutPath ?? null,
+              errorSummary: `Outlet/Tab 与 Route 不一致: ${outletViolations.map(v => v.segment).join(', ')}`,
+              errorDetail: detailedError,
+              fixHint: hints.join('\n'),
+              resolved: false,
+              createdAt: new Date(),
+            })
+            return
+          }
+          const injectPaths = collectRouteIntegrationContextPaths(sandbox.path, projectContext)
+          for (const p of injectPaths) {
+            staticGuardInjectPaths.add(p.replace(/\\/g, '/'))
+          }
+          if (injectPaths.length > 0) {
+            console.log(`[coding] outlet-nav 未通过，已将路由上下文并入下一轮 plan: ${injectPaths.join(', ')}`)
+          }
+          continue
+        }
+      }
+
+      // ── 5.7 相对 import 须在沙箱内可解析（避免 Vite Failed to resolve import 在仅跑 vitest 时漏检）
+      if (process.env.THEHAND_DISABLE_RELATIVE_IMPORT_GUARD !== '1') {
+        const importViolations = await findUnresolvedRelativeImportsInFileMap(
+          sandbox.path,
+          projectContext,
+          planFilesFull,
+          fileMap,
+        )
+        if (importViolations.length > 0) {
+          const hints = importViolations.map(v => v.message)
+          const err = `相对 import 无法解析:\n${hints.join('\n')}`
+          codeErrors.push(`第${codeAttempt}轮: ${err}`)
+          yield {
+            type: 'executing',
+            phase: `relative-import-resolve: ${importViolations.length} 处 import 目标不存在`,
+            progress: 57.5,
+            warnings: hints,
+          }
+          if (codeAttempt === MAX_RETRIES) {
+            const detailedError = `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`
+            yield {
+              type: 'failed',
+              requirement,
+              error: detailedError,
+              userMessage: `代码中存在无法解析的相对路径 import：${importViolations.map(v => `${v.fromPath} → «${v.specifier}»`).join('；')}。请对照仓库实际目录修正 import。`,
+            }
+            requirement.status = 'failed'
+            await requirementMemory.saveRequirement(requirement)
+            await requirementMemory.saveLesson({
+              id: crypto.randomUUID(),
+              projectId,
+              requirementId: requirement.id,
+              phase: 'coding',
+              filePath: importViolations[0]?.fromPath ?? null,
+              errorSummary: `无法解析的 import: ${importViolations.map(v => v.specifier).join(', ')}`,
+              errorDetail: detailedError,
+              fixHint: hints.join('\n'),
+              resolved: false,
+              createdAt: new Date(),
+            })
+            return
+          }
+          for (const v of importViolations) {
+            staticGuardInjectPaths.add(v.fromPath.replace(/\\/g, '/'))
+          }
+          console.log(
+            `[coding] relative-import 未通过，已并入下一轮 plan: ${[...new Set(importViolations.map(v => v.fromPath))].join(', ')}`,
+          )
           continue
         }
       }
@@ -1197,11 +1441,22 @@ export class Orchestrator {
     yield* this.run(requirement, projectId)
   }
 
-  private parsePlan(output: any): FilePlan[] {
-    if (Array.isArray(output)) return output
-    if (output.files && Array.isArray(output.files)) return output.files
-    if (output.plan && Array.isArray(output.plan)) return output.plan
-    return []
+  private parsePlan(output: any): { files: FilePlan[]; includeRouteEntryContext: boolean } {
+    let files: FilePlan[] = []
+    if (Array.isArray(output)) {
+      files = output
+    } else if (output?.files && Array.isArray(output.files)) {
+      files = output.files
+    } else if (output?.plan && Array.isArray(output.plan)) {
+      files = output.plan
+    }
+
+    let includeRouteEntryContext = false
+    if (output && typeof output === 'object' && !Array.isArray(output) && output.includeRouteEntryContext === true) {
+      includeRouteEntryContext = true
+    }
+
+    return { files, includeRouteEntryContext }
   }
 
   /**

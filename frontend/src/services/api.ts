@@ -84,6 +84,13 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return res.json()
 }
 
+const DEFAULT_PROJECT_ID = import.meta.env.VITE_THEHAND_DEFAULT_PROJECT_ID?.trim()
+if (!DEFAULT_PROJECT_ID) {
+  throw new Error(
+    '[thehand] 缺少 VITE_THEHAND_DEFAULT_PROJECT_ID。请在仓库根目录 .env 中配置，并与 THEHAND_DEFAULT_PROJECT_ID 保持一致（见 .env.example）。',
+  )
+}
+
 export const api = {
   async createRequirement(input: string): Promise<Requirement> {
     const res = await fetch(`${BASE}/requirements`, {
@@ -137,7 +144,7 @@ export const api = {
     return handleResponse(res)
   },
 
-  async runOrchestrator(requirementId: string, projectId = 'conduit'): Promise<{ ok: boolean; message: string }> {
+  async runOrchestrator(requirementId: string, projectId = DEFAULT_PROJECT_ID): Promise<{ ok: boolean; message: string }> {
     const res = await fetch(`${BASE}/orchestrator/run/${requirementId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

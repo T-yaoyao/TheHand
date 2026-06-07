@@ -2,12 +2,14 @@ import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { randomUUID } from 'crypto'
 import { execFileSync } from 'child_process'
-import { resolve } from 'path'
+import { resolveSandboxRepoAbs } from '@thehand/core'
 import { queryAll, queryOne, execute, executeBatch } from '../db.js'
 import { isOrchestratorRunning, runOrchestratorForRequirement } from '../orchestrator-runner.js'
 import { log } from '../logger.js'
 
-const sourceRepo = resolve(process.cwd(), '..', 'sandbox-repo', 'conduit-realworld-example-app')
+function getSourceRepoRoot(): string {
+  return resolveSandboxRepoAbs()
+}
 
 export const requirementsRouter = Router()
 
@@ -201,13 +203,13 @@ requirementsRouter.post('/:id/revert', async (req: Request, res: Response) => {
     // 通过 commit message 中的 [req:ID] 标记查找对应 commit
     // 使用 execFileSync 绕过 shell，避免 Windows cmd.exe 对 [ ] 的转义问题
     const reqMarker = `[req:${id.slice(0, 8)}]`
-    log.info(`[api] 搜索 commit marker: "${reqMarker}" in ${sourceRepo}`)
+    log.info(`[api] 搜索 commit marker: "${reqMarker}" in ${getSourceRepoRoot()}`)
 
     let logOutput: string
     try {
       logOutput = execFileSync('git', [
         'log', '--oneline', '-20', '--fixed-strings', `--grep=${reqMarker}`,
-      ], { cwd: sourceRepo, timeout: 15_000 }).toString()
+      ], { cwd: getSourceRepoRoot(), timeout: 15_000 }).toString()
     } catch (gitErr: any) {
       // git log 在无匹配时返回 exit code 1，stdout 为空
       logOutput = gitErr.stdout?.toString() ?? ''
@@ -223,7 +225,7 @@ requirementsRouter.post('/:id/revert', async (req: Request, res: Response) => {
 
     // revert 最新的 commit
     const commitHash = commits[0].split(' ')[0]
-    execFileSync('git', ['revert', '--no-edit', commitHash], { cwd: sourceRepo, timeout: 30_000 })
+    execFileSync('git', ['revert', '--no-edit', commitHash], { cwd: getSourceRepoRoot(), timeout: 30_000 })
 
     // 更新需求状态
     execute(`UPDATE requirements SET status = 'reverted', updated_at = datetime('now') WHERE id = ?`, [id])

@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react'
+import { useRef } from 'react'
 import { useGSAP } from '@gsap/react'
 import gsap from 'gsap'
 import type { OrchestratorEvent } from '../hooks/useSSE'
@@ -6,7 +6,7 @@ import { statusLabel } from '../utils/status'
 
 const PIPELINE = [
   { keys: ['clarifying', 'clarified', 'waiting-for-pm', 'needs-confirmation'], label: '澄清' },
-  { keys: ['planning', 'plan-approved', 'plan-rejected'], label: '方案' },
+  { keys: ['planning', 'plan-ready', 'plan-approved', 'plan-rejected'], label: '方案' },
   { keys: ['coding'], label: '编码' },
   { keys: ['testing'], label: '测试' },
   { keys: ['diff-ready'], label: '确认' },
@@ -21,12 +21,75 @@ interface StatusFlowProps {
   onReconnect?: () => void
 }
 
-function deriveStatus(latest: OrchestratorEvent | null, fallback: string): string {
-  if (!latest) return fallback
+/** 从事件流中取最近一次状态（executing 等事件常不带 requirement） */
+function lastStatusChangeFromEvents(events: OrchestratorEvent[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]
+    if (ev.type === 'status-change' && ev.status) return ev.status
+  }
+  return null
+}
+
+/**
+ * 根据 executing.phase 推断「逻辑阶段」，避免 latest 仅为 executing 时回退到过期的 requirementStatus（如仍为 plan-ready）。
+ */
+function inferStatusFromPhase(phase: string | undefined, eventType: string): string | null {
+  if (!phase) {
+    if (eventType === 'plan-ready') return 'plan-ready'
+    if (eventType === 'diff-ready') return 'diff-ready'
+    return null
+  }
+  const p = phase.toLowerCase()
+  if (eventType !== 'executing') return null
+
+  if (
+    p.includes('architect') ||
+    p.startsWith('coding') ||
+    p.startsWith('skill:') ||
+    p.includes('coding batch') ||
+    p.includes('validating-files') ||
+    p.includes('writing-files') ||
+    p.includes('diff-validation') ||
+    p.includes('file-validation') ||
+    p.includes('no-change-detected') ||
+    p.startsWith('warning:') ||
+    p.includes('critical-missing') ||
+    (p.includes('test failed') && p.includes('retrying coding')) ||
+    (p.includes('reading ') && p.includes('error-related'))
+  ) {
+    return 'coding'
+  }
+  if (p.startsWith('testing')) return 'testing'
+  if (p.includes('planning') || p.includes('plan retry') || p.includes('risk-assessment')) return 'planning'
+  if (p.includes('enhanced-diff') || p.includes('diff-check') || p.includes('unexpected changes')) return 'testing'
+  if (p.includes('committing') || p.includes('committed to sandbox') || p.includes('commit failed') || p.includes('applying')) {
+    return 'diff-ready'
+  }
+  return null
+}
+
+function deriveStatus(
+  latest: OrchestratorEvent | null,
+  fallback: string,
+  events: OrchestratorEvent[],
+): string {
+  if (!latest) return lastStatusChangeFromEvents(events) ?? fallback
+
   if (latest.type === 'failed') return 'failed'
   if (latest.type === 'completed') return 'done'
   if (latest.type === 'status-change' && latest.status) return latest.status
+
   if (latest.requirement?.status) return latest.requirement.status
+
+  const fromPhase = inferStatusFromPhase(latest.phase, latest.type)
+  if (fromPhase) return fromPhase
+
+  if (latest.type === 'plan-ready') return 'plan-ready'
+  if (latest.type === 'diff-ready') return 'diff-ready'
+
+  const last = lastStatusChangeFromEvents(events)
+  if (last) return last
+
   return fallback
 }
 
@@ -50,7 +113,7 @@ function lastActiveStepFromEvents(events: OrchestratorEvent[]): number {
 }
 
 export function StatusFlow({ events, latestEvent, connected, requirementStatus, onReconnect }: StatusFlowProps) {
-  const current = deriveStatus(latestEvent, requirementStatus)
+  const current = deriveStatus(latestEvent, requirementStatus, events)
   const isDone = current === 'done'
   const isFailed = latestEvent?.type === 'failed' || current === 'failed'
   const activeIdx = isFailed ? lastActiveStepFromEvents(events) : stepIndex(current)

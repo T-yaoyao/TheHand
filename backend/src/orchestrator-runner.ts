@@ -1,4 +1,4 @@
-import { resolve } from 'path'
+import { resolve, join } from 'path'
 import {
   LLMClient,
   PromptManager,
@@ -11,6 +11,9 @@ import {
   createFileReadTool,
   createFileWriteTool,
   createShellTool,
+  resolveSandboxRepoAbs,
+  resolveProjectsDir,
+  getDefaultProjectId,
 } from '@thehand/core'
 import type { OrchestratorEvent } from '@thehand/core'
 import { DbRequirementMemory, loadRequirementFromDb } from './db-requirement-memory.js'
@@ -19,7 +22,10 @@ import { pushEvent } from './routes/events.js'
 import { log } from './logger.js'
 
 const repoRoot = resolve(process.cwd(), '..')
-const sandboxSource = resolve(repoRoot, 'sandbox-repo', 'conduit-realworld-example-app')
+
+function getSandboxSourceRoot(): string {
+  return resolveSandboxRepoAbs()
+}
 
 const runningJobs = new Set<string>()
 
@@ -33,24 +39,25 @@ async function getDeps() {
     depsPromise = (async () => {
       const llmClient = new LLMClient()
       const promptManager = new PromptManager(resolve(repoRoot, 'prompts'))
-      const projectMemory = new ProjectMemory(resolve(repoRoot, 'projects'))
+      const projectMemory = new ProjectMemory(resolveProjectsDir())
       const requirementMemory = new DbRequirementMemory() as unknown as RequirementMemory
-      const sandboxManager = new DockerSandboxManager(sandboxSource, {
+      const sandboxRoot = getSandboxSourceRoot()
+      const sandboxManager = new DockerSandboxManager(sandboxRoot, {
         network: process.env.SANDBOX_NETWORK ?? 'bridge',
         memory: process.env.SANDBOX_MEMORY ?? '1g',
         cpus: process.env.SANDBOX_CPUS ?? '1.0',
       })
 
       const tools = [
-        createFileReadTool(sandboxSource),
-        createFileWriteTool(sandboxSource),
-        createShellTool(sandboxSource),
+        createFileReadTool(sandboxRoot),
+        createFileWriteTool(sandboxRoot),
+        createShellTool(sandboxRoot),
       ]
 
-      const agentRunner = new AgentRunner(llmClient, tools, sandboxSource)
+      const agentRunner = new AgentRunner(llmClient, tools, sandboxRoot)
       const skillRegistry = new SkillRegistry()
       skillRegistry.setLLMClient(llmClient)
-      await skillRegistry.discover(resolve(repoRoot, 'projects/conduit'))
+      await skillRegistry.discover(join(resolveProjectsDir(), getDefaultProjectId()))
 
       const orchestrator = new Orchestrator({
         agentRunner,
@@ -77,7 +84,7 @@ export function isOrchestratorRunning(requirementId: string): boolean {
  */
 export async function runOrchestratorForRequirement(
   requirementId: string,
-  projectId = 'conduit',
+  projectId = getDefaultProjectId(),
 ): Promise<void> {
   if (runningJobs.has(requirementId)) {
     throw new Error('该需求正在运行中，请稍候')
@@ -115,12 +122,8 @@ export async function runOrchestratorForRequirement(
     projectId,
   })
 
-  // 立即推送状态变更事件，让前端同步
-  pushEvent(requirementId, {
-    type: 'status-change',
-    status: 'clarifying',
-    agent: 'orchestrator-runner',
-  })
+  // 状态由 orchestrator.run() yield 的 status-change 同步；勿在此推送 clarifying，
+  // 否则与编排器首轮「澄清中」重复，且 plan-ready 续跑时会误发 clarifying。
 
   let eventCount = 0
 
