@@ -135,7 +135,9 @@ ${contextHint}${constraintsHint}${errorHint}
  * 分批生成代码：只生成一个 batch 的文件，带精简上下文
  * 用于纯代码分批策略下的单批次执行
  */
-export async function runCodingBatch(llmClient, promptManager, batch, plan, fileInterfaces, generatedSummaries, sandboxPath, projectContext, errorHint) {
+export async function runCodingBatch(llmClient, promptManager, batch, plan, fileInterfaces, generatedSummaries, sandboxPath, projectContext, errorHint, 
+// Architect Agent 增强数据（可选，有则替代正则提取的信息）
+architectFiles, crossFileRefs, globalContext) {
     const systemPrompt = await promptManager.load('coding');
     // 构建项目约束
     let constraintsHint = '';
@@ -159,9 +161,17 @@ export async function runCodingBatch(llmClient, promptManager, batch, plan, file
         catch {
             originalContent = '（新文件，不存在）';
         }
+        // 优先使用 architect 的 detailedChange，降级到 plan 的 changeDescription
+        const archFile = architectFiles?.find(f => f.path === filePath);
         const planItem = plan.find(f => f.path === filePath);
-        const changeDesc = planItem?.changeDescription ?? '';
-        fileContexts.push(`### ${filePath}\n操作: ${changeDesc}\n\`\`\`\n${originalContent}\n\`\`\``);
+        const changeDesc = archFile?.detailedChange ?? planItem?.changeDescription ?? '';
+        const actionHint = archFile?.action ? `操作类型: ${archFile.action}\n` : '';
+        fileContexts.push(`### ${filePath}\n${actionHint}改动指令: ${changeDesc}\n\`\`\`\n${originalContent}\n\`\`\``);
+    }
+    // 全局上下文（来自 architect 的整体变更分析）
+    let globalContextHint = '';
+    if (globalContext) {
+        globalContextHint = `\n\n## 整体变更逻辑\n${globalContext}`;
     }
     // 已生成文件的接口摘要（来自前序 batch）
     let generatedSummaryHint = '';
@@ -172,29 +182,42 @@ export async function runCodingBatch(llmClient, promptManager, batch, plan, file
         }
         generatedSummaryHint = lines.join('\n');
     }
-    // 本批次文件涉及的跨文件 import 关系
-    const batchFileSet = new Set(batch.files);
-    const batchInterfaces = fileInterfaces.filter(f => batchFileSet.has(f.path));
-    const crossRefs = [];
-    for (const fi of batchInterfaces) {
-        for (const importLine of fi.imports) {
-            const importMatch = importLine.match(/from\s+['"]([^'"]+)['"]/) ||
-                importLine.match(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/);
-            if (importMatch) {
-                const importPath = importMatch[1];
-                if (importPath.startsWith('.')) {
-                    crossRefs.push(`${fi.path} imports: ${importLine.trim()}`);
+    // 跨文件引用关系：优先使用 architect 的 crossFileRefs，降级到正则提取
+    let crossRefHint = '';
+    if (crossFileRefs && crossFileRefs.length > 0) {
+        // 只取与本批次相关的 cross-file refs（from 或 to 在本批次中）
+        const batchFileSetForRef = new Set(batch.files);
+        const relevantRefs = crossFileRefs.filter(r => batchFileSetForRef.has(r.from) || batchFileSetForRef.has(r.to));
+        if (relevantRefs.length > 0) {
+            crossRefHint = '\n\n## 跨文件引用关系（必须保持一致）\n' +
+                relevantRefs.map(r => `- ${r.from} → ${r.to}: ${r.ref}`).join('\n');
+        }
+    }
+    else {
+        // fallback：正则提取的 import 关系
+        const batchFileSet = new Set(batch.files);
+        const batchInterfaces = fileInterfaces.filter(f => batchFileSet.has(f.path));
+        const crossRefs = [];
+        for (const fi of batchInterfaces) {
+            for (const importLine of fi.imports) {
+                const importMatch = importLine.match(/from\s+['"]([^'"]+)['"]/) ||
+                    importLine.match(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/);
+                if (importMatch) {
+                    const importPath = importMatch[1];
+                    if (importPath.startsWith('.')) {
+                        crossRefs.push(`${fi.path} imports: ${importLine.trim()}`);
+                    }
                 }
             }
         }
-    }
-    let crossRefHint = '';
-    if (crossRefs.length > 0) {
-        crossRefHint = '\n\n## 本批次文件的 import 关系（注意保持一致）\n' +
-            crossRefs.map(r => `- ${r}`).join('\n');
+        if (crossRefs.length > 0) {
+            crossRefHint = '\n\n## 本批次文件的 import 关系（注意保持一致）\n' +
+                crossRefs.map(r => `- ${r}`).join('\n');
+        }
     }
     const userMessage = `## 本批次需要生成的文件
 ${batch.files.join(', ')}
+${globalContextHint}
 
 ## 各文件原始内容和改动指令
 ${fileContexts.join('\n\n')}

@@ -11,6 +11,7 @@ import type {
   RiskAssessment,
   NaturalLanguageSummary,
   FileValidationSummary,
+  ArchitectOutput,
 } from '../types.js'
 import type { AgentRunner } from '../agents/agent-runner.js'
 import type { SkillRegistry } from '../skill-registry/skill-registry.js'
@@ -18,8 +19,8 @@ import type { LLMClient } from '../llm/llm-client.js'
 import type { PromptManager } from '../llm/prompt-manager.js'
 import { runClarification } from '../agents/clarification-agent.js'
 import { createPlanAgent } from '../agents/plan-agent.js'
-import { runCoding, runCodingBatch, extractInterfaceSummary } from '../agents/coding-agent.js'
-import { buildBatches } from '../agents/architect-agent.js'
+import { runCodingBatch, extractInterfaceSummary } from '../agents/coding-agent.js'
+import { buildBatches, extractFileInterfaces, runArchitect } from '../agents/architect-agent.js'
 import { join, dirname } from 'path'
 import type { Sandbox } from '../git-ops/sandbox.js'
 import type { DockerSandboxManager } from '../git-ops/docker-sandbox.js'
@@ -306,6 +307,39 @@ export class Orchestrator {
       let plan: FilePlan[] = []
       const planErrors: string[] = []
 
+      // 扫描项目组件目录，注入到 plan agent 输入中，避免创建已有组件的替代品
+      let existingComponentsHint = ''
+      try {
+        const { readdir } = await import('fs/promises')
+        const scanDir = async (dir: string, prefix: string = ''): Promise<string[]> => {
+          const results: string[] = []
+          try {
+            const entries = await readdir(dir, { withFileTypes: true })
+            for (const e of entries) {
+              if (e.name.startsWith('.') || e.name === 'node_modules') continue
+              const relPath = prefix ? `${prefix}/${e.name}` : e.name
+              if (e.isDirectory()) {
+                results.push(...await scanDir(`${dir}/${e.name}`, relPath))
+              } else if (/\.(jsx?|tsx|vue)$/.test(e.name) && !e.name.endsWith('.d.ts')) {
+                results.push(relPath)
+              }
+            }
+          } catch {}
+          return results
+        }
+        const componentFiles = await scanDir(join(sandbox.path, 'frontend/src/components'))
+        const routeFiles = await scanDir(join(sandbox.path, 'frontend/src/routes'))
+        if (componentFiles.length > 0 || routeFiles.length > 0) {
+          existingComponentsHint = '\n\n## 现有前端组件文件（必须修改已有组件，不要创建同名替代品）'
+          if (componentFiles.length > 0) {
+            existingComponentsHint += '\n### 组件 components/\n' + componentFiles.map(f => `- ${f}`).join('\n')
+          }
+          if (routeFiles.length > 0) {
+            existingComponentsHint += '\n### 路由页面 routes/\n' + routeFiles.map(f => `- ${f}`).join('\n')
+          }
+        }
+      } catch {}
+
       for (let planAttempt = 1; planAttempt <= MAX_RETRIES; planAttempt++) {
         yield { type: 'executing', phase: `planning (attempt ${planAttempt}/${MAX_RETRIES})`, progress: 20 }
 
@@ -315,6 +349,7 @@ export class Orchestrator {
         if (deleteHistoryHint) {
           planInput += deleteHistoryHint
         }
+        planInput += existingComponentsHint
 
         const planContext: AgentContext = {
           requirement: { ...requirement, pmInput: planInput },
@@ -327,7 +362,7 @@ export class Orchestrator {
         if (planResult.status === 'success' && planResult.output) {
           const parsed = this.parsePlan(planResult.output)
           if (parsed.length > 0) {
-            plan = parsed
+            plan = await this.resolvePlanToExistingFiles(parsed, sandbox.path)
             break
           }
         }
@@ -453,6 +488,7 @@ export class Orchestrator {
       }
 
       codeOutputs = []
+      let architectOutput: ArchitectOutput | null = null
 
       if (skill) {
         yield { type: 'executing', phase: `skill: ${skill.name}`, progress: 35 }
@@ -469,20 +505,41 @@ export class Orchestrator {
             : '',
         ].filter(Boolean).join('')
 
-        if (planFiles.length <= 3) {
-          // 小 plan：直接走原路径，不引入 Architect 开销
-          yield { type: 'executing', phase: `coding-agent (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 35 }
-          codeOutputs = await runCoding(
-            llmClient, promptManager, planFiles, sandbox.path,
-            projectContext,
-            codingHint || undefined,
-            codeAttempt > 1 ? previousOutputs : undefined,
-            lastTestError,
-          )
-        } else {
-          // 大 plan：纯代码依赖分析 + 分批生成（零额外 LLM 消耗）
-          yield { type: 'executing', phase: `analyzing dependencies for ${planFiles.length} files`, progress: 32 }
-          const { batches, fileInterfaces } = await buildBatches(sandbox.path, planFiles)
+        if (false) {
+          // 小 plan 直出路径已废弃：始终走 architect 以确保新文件被集成
+          // （architect 的 ensureNewFilesIntegrated() 能自动检测并补全父文件引用）
+        }
+        {
+          // 始终走 LLM Architect 分析依赖 + 分批生成
+          yield { type: 'executing', phase: `architect analyzing ${planFiles.length} files...`, progress: 32 }
+
+          // 尝试 LLM Architect 分析，失败则降级到正则分批
+          try {
+            if (requirement.structuredRequirement) {
+              architectOutput = await runArchitect(
+                this.deps.agentRunner, promptManager, planFiles, sandbox.path,
+                projectContext, requirement.structuredRequirement,
+              )
+            }
+          } catch (archErr: any) {
+            console.warn('[architect] LLM 分析异常，降级到正则分批:', archErr.message)
+            yield { type: 'executing', phase: `architect 异常: ${archErr.message?.slice(0, 100) ?? 'unknown'}`, progress: 33, warnings: ['LLM 依赖分析异常，将降级到正则分批'] }
+          }
+
+          let batches, fileInterfaces
+          if (architectOutput) {
+            // LLM 分析成功：使用 architect 的分批方案
+            batches = architectOutput.batches
+            fileInterfaces = await extractFileInterfaces(sandbox.path, planFiles)
+            yield { type: 'executing', phase: `architect: ${batches.length} batches, ${architectOutput.crossFileRefs.length} cross-refs`, progress: 34 }
+          } else {
+            // 降级：正则分批
+            console.log('[batching] 降级到正则分批')
+            const fallback = await buildBatches(sandbox.path, planFiles)
+            batches = fallback.batches
+            fileInterfaces = fallback.fileInterfaces
+            yield { type: 'executing', phase: `architect 失败，降级到正则分批: ${batches.length} batches`, progress: 34, warnings: ['LLM 依赖分析未生效，使用正则分批'] }
+          }
           console.log(`[batching] ${batches.length} batches: ${batches.map(b => `[${b.files.join(', ')}]`).join(' → ')}`)
 
           // 分批 Coding
@@ -501,6 +558,10 @@ export class Orchestrator {
                 llmClient, promptManager, batch, planFiles, fileInterfaces,
                 generatedSummaries, sandbox.path, projectContext,
                 errorHintCombined || undefined,
+                // 传递 architect 增强数据
+                architectOutput?.files,
+                architectOutput?.crossFileRefs,
+                architectOutput?.globalContext,
               )
               codeOutputs.push(...batchOutputs)
 
@@ -658,6 +719,93 @@ export class Orchestrator {
           phase: `warning: ${fallbackOriginal.length} 个文件保留原始内容`,
           progress: 55,
           warnings: fallbackOriginal,
+        }
+      }
+
+      // ── 5.5 组件文件集成校验（阻断式，触发重试） ──
+      // 检查所有生成的组件文件（不论新建还是修改）是否被路由/页面文件真正 import
+      // 跳过样式/资源文件（它们由组件内部 import）
+      const COMPONENT_EXTS = /\.(jsx?|tsx|vue)$/
+      const STYLE_ASSET_EXTS = /\.(css|scss|less|svg|png|jpg|json)$/
+      const BARREL_EXTS = /\/index\.(jsx?|tsx|js|ts)$/
+
+      const generatedComponentFiles = planFilesFull.filter(f => {
+        if (STYLE_ASSET_EXTS.test(f.path)) return false
+        if (!COMPONENT_EXTS.test(f.path)) return false
+        if (BARREL_EXTS.test(f.path)) return false // index.js barrel export 不参与检测
+        // 只检测被生成了的文件
+        return fileMap.has(f.path)
+      })
+
+      if (generatedComponentFiles.length > 0) {
+        const orphanFiles: string[] = []
+        const orphanHints: string[] = []
+        for (const nf of generatedComponentFiles) {
+          const baseName = nf.path.split('/').pop()?.replace(/\.(jsx?|tsx|vue)$/, '') ?? ''
+          if (!baseName) continue
+
+          // 检查是否有其他生成文件（排除自身、barrel export、样式文件）真正 import 了这个组件
+          const isImported = Array.from(fileMap.values()).some(other => {
+            if (other.path === nf.path) return false
+            if (BARREL_EXTS.test(other.path)) return false // barrel export 不算真正使用
+            if (STYLE_ASSET_EXTS.test(other.path)) return false
+            const content = other.content
+            return new RegExp(`from\\s+['"][^'"]*${baseName}['"]`).test(content) ||
+                   content.includes(`import('${nf.path}')`)
+          })
+
+          if (!isImported) {
+            orphanFiles.push(nf.path)
+            // 推断最可能的父文件
+            const nfDir = nf.path.split('/').slice(0, -1).join('/')
+            const likelyParent = planFilesFull.find(f => {
+              if (f.path === nf.path) return false
+              if (STYLE_ASSET_EXTS.test(f.path)) return false
+              if (BARREL_EXTS.test(f.path)) return false
+              const fDir = f.path.split('/').slice(0, -1).join('/')
+              if (fDir === nfDir) return false
+              return f.path.includes('/routes/') || f.path.includes('List') ||
+                     f.path.includes('Section') || f.path.includes('Home') ||
+                     f.path.includes('Page') || f.path.includes('View')
+            })
+            if (likelyParent) {
+              orphanHints.push(`${nf.path} 未被 import，必须同时修改 ${likelyParent.path} 来 import 并使用它`)
+            } else {
+              orphanHints.push(`${nf.path} 未被任何文件 import，必须修改父组件来 import 并使用它`)
+            }
+          }
+        }
+
+        if (orphanFiles.length > 0) {
+          const err = `组件孤立（未被父组件 import）:\n${orphanHints.join('\n')}`
+          codeErrors.push(`第${codeAttempt}轮: ${err}`)
+          yield {
+            type: 'executing',
+            phase: `orphan-files: ${orphanFiles.length} 个组件未被引用`,
+            progress: 56,
+            warnings: orphanHints,
+          }
+
+          if (codeAttempt === MAX_RETRIES) {
+            const detailedError = `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`
+            yield { type: 'failed', requirement, error: detailedError, userMessage: `组件未被集成到页面中：${orphanFiles.join(', ')}。请尝试重新描述需求，明确要求修改父组件来引用新组件。` }
+            requirement.status = 'failed'
+            await requirementMemory.saveRequirement(requirement)
+            await requirementMemory.saveLesson({
+              id: crypto.randomUUID(),
+              projectId,
+              requirementId: requirement.id,
+              phase: 'coding',
+              filePath: null,
+              errorSummary: `孤立组件: ${orphanFiles.join(', ')}`,
+              errorDetail: detailedError,
+              fixHint: orphanHints.join('\n'),
+              resolved: false,
+              createdAt: new Date(),
+            })
+            return
+          }
+          continue
         }
       }
 
@@ -836,6 +984,14 @@ export class Orchestrator {
         for (const lesson of pastLessons) {
           await requirementMemory.markLessonResolved(lesson.id)
         }
+
+        // 测试通过后清理 .orig 备份文件，避免污染 diff
+        if (executor) {
+          try {
+            await executor('find . -name "*.orig" -delete', { timeout: 10_000 })
+          } catch {}
+        }
+
         break
       }
 
@@ -947,24 +1103,6 @@ export class Orchestrator {
       } catch {}
     }
 
-    // Take page screenshot
-    let screenshot: string | null = null
-    if ('startDevServer' in sandboxManager && 'takeScreenshot' in sandboxManager) {
-      try {
-        yield { type: 'executing', phase: 'starting dev server', progress: 85 }
-        const sm = sandboxManager as any
-        const serverStarted = await sm.startDevServer(3000, 30_000)
-        if (serverStarted) {
-          yield { type: 'executing', phase: 'taking screenshot', progress: 87 }
-          const planForRoute = requirement.plan ?? []
-          const route = this.extractRouteFromPlan(planForRoute)
-          screenshot = await sm.takeScreenshot(3000, route)
-        }
-      } catch {
-        // Screenshot failed, fallback to diff
-      }
-    }
-
     requirement.status = 'diff-ready'
     await requirementMemory.saveRequirement(requirement)
     this.sandboxShouldCleanup = false  // 暂停点，保留沙箱供后续 commit
@@ -972,7 +1110,6 @@ export class Orchestrator {
       type: 'diff-ready',
       requirement,
       diff: diffContent,
-      screenshot: screenshot ?? undefined,
       files: validOutputs.map(f => ({ path: f.path, summary: f.summary })),
       diffCheck: diffCheckResult,
       fileValidationSummary: finalFileValidationSummary ?? undefined,
@@ -992,8 +1129,9 @@ export class Orchestrator {
   ): AsyncGenerator<OrchestratorEvent> {
     yield { type: 'executing', phase: 'committing', progress: 90 }
 
-    const rawCommitMsg = `feat: ${requirement.structuredRequirement?.description ?? requirement.pmInput} [req:${requirement.id.slice(0, 8)}]`
-    const commitMsg = rawCommitMsg.replace(/[`$"]/g, "'").slice(0, 200)
+    const reqMarker = `[req:${requirement.id.slice(0, 8)}]`
+    const rawDesc = (requirement.structuredRequirement?.description ?? requirement.pmInput).replace(/[`$"]/g, "'")
+    const commitMsg = `${reqMarker} feat: ${rawDesc}`.slice(0, 200)
 
     try {
       await repoManager.commit(commitMsg)
@@ -1066,17 +1204,102 @@ export class Orchestrator {
     return []
   }
 
-  private extractRouteFromPlan(plan: FilePlan[]): string {
+  /**
+   * 将 plan 中的新文件映射到已有的相似文件
+   * 解决 LLM 创建 ArticlePreview.jsx 而不是修改 ArticlesPreview.jsx 的问题
+   */
+  private async resolvePlanToExistingFiles(plan: FilePlan[], sandboxPath: string): Promise<FilePlan[]> {
+    const { access } = await import('fs/promises')
+    const resolved: FilePlan[] = []
+
     for (const file of plan) {
-      const path = file.path.toLowerCase()
-      if (path.includes('/pages/') || path.includes('/views/') || path.includes('/routes/')) {
-        const name = file.path.split('/').pop()?.replace(/\.(tsx?|vue|jsx?)$/, '') ?? ''
-        if (name && name !== 'index' && name !== 'App') {
-          return `/${name.toLowerCase()}`
-        }
+      const fullPath = join(sandboxPath, file.path)
+
+      // 检查文件是否已存在
+      let exists = false
+      try { await access(fullPath); exists = true } catch {}
+
+      if (exists) {
+        resolved.push(file)
+        continue
+      }
+
+      // 文件不存在 → 在同目录和父目录中查找名称相似的已有文件
+      const dir = file.path.split('/').slice(0, -1).join('/')
+      const name = file.path.split('/').pop()?.replace(/\.(jsx?|tsx|vue)$/, '') ?? ''
+      if (!name) { resolved.push(file); continue }
+
+      // 扫描同目录和父目录
+      const searchDirs = [dir]
+      const parts = dir.split('/')
+      for (let i = parts.length - 1; i >= 0; i--) {
+        searchDirs.push(parts.slice(0, i).join('/'))
+      }
+
+      let bestMatch: string | null = null
+      for (const searchDir of searchDirs) {
+        if (!searchDir) continue
+        try {
+          const entries = await this.listFilesRecursive(join(sandboxPath, searchDir))
+          for (const entry of entries) {
+            const entryName = entry.replace(/\.(jsx?|tsx|vue)$/, '').split('/').pop() ?? ''
+            if (!entryName) continue
+            // 名称相似：大小写相同、单复数差异、包含关系
+            if (entryName.toLowerCase() === name.toLowerCase() ||
+                entryName.toLowerCase() === name.toLowerCase() + 's' ||
+                name.toLowerCase() === entryName.toLowerCase() + 's' ||
+                (entryName.length > 3 && name.length > 3 &&
+                 (entryName.toLowerCase().includes(name.toLowerCase()) ||
+                  name.toLowerCase().includes(entryName.toLowerCase())))) {
+              bestMatch = `${searchDir}/${entry}`
+              break
+            }
+          }
+          if (bestMatch) break
+        } catch {}
+      }
+
+      if (bestMatch) {
+        // 把新文件替换为修改已有文件
+        const existingPath = bestMatch.replace(/\\/g, '/')
+        console.log(`[plan-resolve] ${file.path} → ${existingPath}（已有相似文件，改为修改）`)
+        resolved.push({
+          path: existingPath,
+          changeDescription: `[自动修正] 原计划创建 ${file.path}，但 ${existingPath} 已存在。${file.changeDescription}`,
+          priority: file.priority,
+        })
+      } else {
+        resolved.push(file)
       }
     }
-    return '/'
+
+    return resolved
+  }
+
+  /**
+   * 递归列出目录下的组件文件
+   */
+  private async listFilesRecursive(dirPath: string, maxDepth: number = 3): Promise<string[]> {
+    const { readdir } = await import('fs/promises')
+    const results: string[] = []
+
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (depth > maxDepth) return
+      try {
+        const entries = await readdir(dir, { withFileTypes: true })
+        for (const e of entries) {
+          if (e.name.startsWith('.') || e.name === 'node_modules') continue
+          if (e.isDirectory()) {
+            await walk(`${dir}/${e.name}`, depth + 1)
+          } else if (/\.(jsx?|tsx|vue)$/.test(e.name) && !e.name.endsWith('.d.ts')) {
+            results.push(e.name)
+          }
+        }
+      } catch {}
+    }
+
+    await walk(dirPath, 0)
+    return results
   }
 
   private isTerminal(status: RequirementStatus): boolean {

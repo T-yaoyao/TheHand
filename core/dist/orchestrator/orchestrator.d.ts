@@ -53,7 +53,15 @@ export declare class Orchestrator {
      */
     continueWithPMReply(requirement: Requirement, pmReply: string, projectId?: string): AsyncGenerator<OrchestratorEvent>;
     private parsePlan;
-    private extractRouteFromPlan;
+    /**
+     * 将 plan 中的新文件映射到已有的相似文件
+     * 解决 LLM 创建 ArticlePreview.jsx 而不是修改 ArticlesPreview.jsx 的问题
+     */
+    private resolvePlanToExistingFiles;
+    /**
+     * 递归列出目录下的组件文件
+     */
+    private listFilesRecursive;
     private isTerminal;
     private selectAgent;
 }

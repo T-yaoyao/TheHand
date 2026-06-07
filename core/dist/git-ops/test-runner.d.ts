@@ -19,7 +19,7 @@ export declare class TestRunner {
     private executor;
     constructor(sandboxPath: string, executor?: CommandExecutor);
     /**
-     * 执行完整的测试流程：lint → test → (失败时) auto-fix → retry
+     * 执行完整的测试流程：lint → test → (失败时) 安装缺失依赖 / auto-fix → retry
      * lint 作为非阻塞检查（warnings 不阻断），test 作为阻塞检查
      */
     run(commands: {

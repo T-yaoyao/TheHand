@@ -80,6 +80,22 @@ export class LLMClient {
                 arguments: this.safeParseJSON(tc.function.arguments),
             }));
         }
+        // 防御：finish_reason=tool_calls 但 tool_calls 为空（doubao API 兼容性问题）
+        if (choice.finish_reason === 'tool_calls' && !toolCalls) {
+            console.warn(`[llm] finish_reason=tool_calls 但 message.tool_calls 为空`);
+            console.warn(`[llm] choice keys: ${Object.keys(choice)}`);
+            console.warn(`[llm] message keys: ${Object.keys(choice.message ?? {})}`);
+            console.warn(`[llm] raw choice (截断): ${JSON.stringify(choice).slice(0, 500)}`);
+            // 尝试从其他字段提取 tool_calls（部分 API 放在 choice 级别而非 message 级别）
+            if (choice.tool_calls) {
+                console.warn(`[llm] 在 choice.tool_calls 找到，尝试提取...`);
+                toolCalls = choice.tool_calls.map((tc) => ({
+                    id: tc.id ?? '',
+                    name: tc.function?.name ?? tc.name ?? '',
+                    arguments: this.safeParseJSON(tc.function?.arguments ?? tc.arguments ?? '{}'),
+                }));
+            }
+        }
         return {
             content: choice.message?.content ?? '',
             toolCalls,

@@ -1,7 +1,62 @@
 import { readFile } from 'fs/promises';
 import { resolve, dirname, join } from 'path';
 // ============================================================
-// 文件接口提取（正则，零 LLM 消耗）
+// Architect Agent Function Calling 输出工具定义
+// ============================================================
+export const ARCHITECT_OUTPUT_TOOL = {
+    type: 'function',
+    function: {
+        name: 'submit_architecture',
+        description: '提交架构分析结果。包含文件改动详情、跨文件引用、分批方案。',
+        parameters: {
+            type: 'object',
+            properties: {
+                globalContext: { type: 'string', description: '本次变更的核心逻辑：一段话描述整体改动' },
+                files: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            path: { type: 'string', description: '文件路径' },
+                            action: { type: 'string', enum: ['create', 'modify', 'delete'], description: '操作类型' },
+                            detailedChange: { type: 'string', description: '精确的改动指令：指明具体位置、函数、字段' },
+                            dependencies: { type: 'array', items: { type: 'string' }, description: '依赖的其他 plan 文件' },
+                            exports: { type: 'array', items: { type: 'string' }, description: '该文件导出的接口' },
+                            priority: { type: 'number', description: '生成优先级，数字越小越先生成' },
+                        },
+                        required: ['path', 'action', 'detailedChange', 'dependencies', 'exports', 'priority'],
+                    },
+                },
+                crossFileRefs: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            from: { type: 'string', description: '引用方文件路径' },
+                            to: { type: 'string', description: '被引用方文件路径' },
+                            ref: { type: 'string', description: '引用关系描述（import/export/API 契约）' },
+                        },
+                        required: ['from', 'to', 'ref'],
+                    },
+                },
+                batches: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            files: { type: 'array', items: { type: 'string' }, description: '该批次的文件列表' },
+                            reason: { type: 'string', description: '分批原因' },
+                        },
+                        required: ['files', 'reason'],
+                    },
+                },
+            },
+            required: ['globalContext', 'files', 'crossFileRefs', 'batches'],
+        },
+    },
+};
+// ============================================================
+// 文件接口提取（正则，零 LLM 消耗 —— 作为 Architect 输入预处理）
 // ============================================================
 /**
  * 用正则提取文件的接口信息
@@ -76,7 +131,284 @@ function extractInterfaceFromContent(filePath, content) {
     return { path: filePath, exports, imports, functionSignatures, routeDefinitions, modelFields };
 }
 // ============================================================
-// 纯代码依赖分析 + 拓扑分批（零 LLM 消耗）
+// LLM Architect Agent
+// ============================================================
+/**
+ * 创建 Architect Agent 定义
+ */
+export function createArchitectAgent(systemPrompt) {
+    return {
+        name: 'architect',
+        description: '分析文件依赖关系，产出精确分批方案和详细改动指令',
+        maxRounds: 3,
+        systemPrompt,
+        tools: ['file-read'],
+        outputTool: ARCHITECT_OUTPUT_TOOL,
+    };
+}
+/**
+ * LLM Architect 主入口
+ * 用大模型分析文件依赖、产出精确分批方案 + 详细改动指令
+ *
+ * @returns ArchitectOutput | null（LLM 失败时返回 null，调用方可降级到正则分批）
+ */
+export async function runArchitect(agentRunner, promptManager, plan, sandboxPath, projectContext, structuredRequirement) {
+    // 1. 正则预处理：提取文件骨架作为 LLM 输入
+    const fileInterfaces = await extractFileInterfaces(sandboxPath, plan);
+    // 2. 加载 architect prompt
+    const systemPromptBase = await promptManager.load('architect');
+    // 3. 构建 system prompt（注入项目上下文和约束）
+    let constraintsHint = '';
+    if (projectContext.constraints) {
+        const entries = Object.entries(projectContext.constraints);
+        if (entries.length > 0) {
+            constraintsHint = '\n\n## 项目约束\n' + entries.map(([k, v]) => `- ${k}: ${v}`).join('\n');
+        }
+    }
+    const systemPrompt = `${systemPromptBase}
+
+## 项目上下文
+${JSON.stringify(projectContext, null, 2)}
+${constraintsHint}`;
+    // 4. 构建 user message
+    const fileInterfaceText = fileInterfaces.map(fi => `### ${fi.path}\n- exports: ${fi.exports.join(', ') || '无'}\n- imports: ${fi.imports.join(', ') || '无'}\n- 函数签名: ${fi.functionSignatures.join(', ') || '无'}\n- 路由定义: ${fi.routeDefinitions.join(', ') || '无'}\n- 模型字段: ${fi.modelFields.join(', ') || '无'}`).join('\n\n');
+    const planText = plan.map(f => `- ${f.path}: ${f.changeDescription} (priority: ${f.priority})`).join('\n');
+    const userMessage = `## 结构化需求
+${JSON.stringify(structuredRequirement, null, 2)}
+
+## 技术方案（需要修改的文件）
+${planText}
+
+## 文件接口信息（正则预提取）
+${fileInterfaceText}
+
+请分析文件依赖关系，输出精确的分批方案和每个文件的详细改动指令。`;
+    // 5. 调用 LLM Agent
+    const agentContext = {
+        requirement: {
+            id: '',
+            status: 'coding',
+            pmInput: '',
+            structuredRequirement,
+            plan,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+        },
+        projectContext,
+        memory: {
+            structuredRequirement,
+            recentConversations: [],
+            projectContext,
+            lessons: [],
+        },
+    };
+    const result = await agentRunner.run(createArchitectAgent(systemPrompt), agentContext);
+    if (result.status !== 'success' || !result.output) {
+        console.warn(`[architect] LLM 分析失败: status=${result.status}, tokens=${result.inputTokens}/${result.outputTokens}`);
+        return null;
+    }
+    // 6. 解析和校验输出
+    const output = result.output;
+    // 基本结构校验
+    if (!output.batches || !Array.isArray(output.batches) || output.batches.length === 0) {
+        console.warn('[architect] LLM 输出缺少 batches，降级到正则分批');
+        return null;
+    }
+    if (!output.files || !Array.isArray(output.files)) {
+        console.warn('[architect] LLM 输出缺少 files，降级到正则分批');
+        return null;
+    }
+    // 确保 batches 覆盖所有 plan 文件
+    const batchFileSet = new Set(output.batches.flatMap(b => b.files));
+    const planFileSet = new Set(plan.map(f => f.path));
+    const missingFromBatches = [...planFileSet].filter(p => !batchFileSet.has(p));
+    if (missingFromBatches.length > 0) {
+        console.warn(`[architect] batches 遗漏文件: ${missingFromBatches.join(', ')}，补充到最后一个 batch`);
+        output.batches[output.batches.length - 1].files.push(...missingFromBatches);
+    }
+    // 确保每个 batch 不超过 3 个文件（prompt 要求，但做容错）
+    const normalizedBatches = [];
+    for (const batch of output.batches) {
+        if (batch.files.length <= 3) {
+            normalizedBatches.push(batch);
+        }
+        else {
+            // 拆分过大的 batch
+            for (let i = 0; i < batch.files.length; i += 3) {
+                normalizedBatches.push({
+                    files: batch.files.slice(i, i + 3),
+                    reason: `${batch.reason}（拆分自过大 batch）`,
+                });
+            }
+        }
+    }
+    // 7. 确保新文件被集成（每个 create 必须有父文件 modify 引用它）
+    const integrationResult = ensureNewFilesIntegrated(output, plan, sandboxPath);
+    console.log(`[architect] LLM 分析完成: ${normalizedBatches.length} batches, ${integrationResult.crossFileRefs.length} cross-file refs`);
+    console.log(`[architect] batches: ${normalizedBatches.map(b => `[${b.files.join(', ')}]`).join(' → ')}`);
+    if (integrationResult.injectedParents.length > 0) {
+        console.log(`[architect] 自动补充了 ${integrationResult.injectedParents.length} 个父文件集成: ${integrationResult.injectedParents.join(', ')}`);
+    }
+    return {
+        globalContext: output.globalContext ?? '',
+        files: integrationResult.files,
+        crossFileRefs: integrationResult.crossFileRefs,
+        batches: normalizedBatches,
+    };
+}
+// ============================================================
+// 新文件集成校验 + 自动补全
+// ============================================================
+/**
+ * 确保每个 action:'create' 的新文件都有父文件引用它
+ * 如果 architect 漏掉了父文件修改，自动注入
+ */
+function ensureNewFilesIntegrated(output, plan, sandboxPath) {
+    const files = [...output.files];
+    const crossFileRefs = [...(output.crossFileRefs ?? [])];
+    const injectedParents = [];
+    // 找出所有 action:'create' 的文件
+    const newFiles = files.filter(f => f.action === 'create');
+    // 前置检测：新建的组件是否和已有组件名称相似（如 ArticlePreview vs ArticlesPreview）
+    const COMPONENT_EXTS = /\.(jsx?|tsx|vue)$/;
+    const allPlanPaths = plan.map(f => f.path);
+    for (const newFile of newFiles) {
+        if (!COMPONENT_EXTS.test(newFile.path))
+            continue;
+        const newName = newFile.path.split('/').pop()?.replace(COMPONENT_EXTS, '').toLowerCase() ?? '';
+        // 检查 plan 中是否有名称相似但不是新建的文件
+        const similarExisting = allPlanPaths.filter(p => {
+            if (p === newFile.path)
+                return false;
+            if (!COMPONENT_EXTS.test(p))
+                return false;
+            const existingName = p.split('/').pop()?.replace(COMPONENT_EXTS, '').toLowerCase() ?? '';
+            // 名称相同（忽略大小写）或一个是另一个的复数形式
+            return existingName === newName ||
+                existingName === newName + 's' ||
+                newName === existingName + 's' ||
+                (existingName.length > 3 && newName.length > 3 && existingName.includes(newName)) ||
+                (existingName.length > 3 && newName.length > 3 && newName.includes(existingName));
+        });
+        if (similarExisting.length > 0) {
+            console.warn(`[architect] ⚠️ 新建 ${newFile.path} 与已有组件 ${similarExisting.join(', ')} 名称相似，建议直接修改已有组件而非创建新文件`);
+        }
+    }
+    for (const newFile of newFiles) {
+        // 检查是否已有 crossFileRef 指向这个新文件（说明有父文件引用它）
+        const hasReferrer = crossFileRefs.some(r => r.to === newFile.path);
+        // 检查是否有其他文件的 detailedChange 提到了这个新文件
+        const hasIntegrator = files.some(f => f.path !== newFile.path &&
+            f.action === 'modify' &&
+            f.detailedChange.toLowerCase().includes(newFile.path.split('/').pop()?.replace(/\.(jsx?|tsx?|vue)$/, '').toLowerCase() ?? ''));
+        if (hasReferrer || hasIntegrator) {
+            continue; // 已被集成，跳过
+        }
+        // 需要自动补充父文件
+        const parentPath = findLikelyParent(newFile.path, plan, files, sandboxPath);
+        if (parentPath) {
+            const newBaseName = newFile.path.split('/').pop()?.replace(/\.(jsx?|tsx?|vue)$/, '') ?? '';
+            // 检查父文件是否已在 files 列表中
+            const existingParent = files.find(f => f.path === parentPath);
+            if (existingParent) {
+                // 已有父文件条目，补充 detailedChange
+                existingParent.detailedChange += `\n【自动补充】必须 import 并使用新组件 ${newBaseName}（来自 ${newFile.path}）`;
+            }
+            else {
+                // 注入新的父文件 modify 条目
+                files.push({
+                    path: parentPath,
+                    action: 'modify',
+                    detailedChange: `【自动补充】import 并使用新组件 ${newBaseName}（来自 ${newFile.path}）。在合适的位置渲染该组件，使其对用户可见。`,
+                    dependencies: [newFile.path],
+                    exports: [],
+                    priority: newFile.priority + 1,
+                });
+            }
+            // 补充 crossFileRef
+            crossFileRefs.push({
+                from: parentPath,
+                to: newFile.path,
+                ref: `import ${newBaseName} from '${getRelativeImportPath(parentPath, newFile.path)}'`,
+            });
+            injectedParents.push(parentPath);
+            console.log(`[architect] 自动补充父文件集成: ${parentPath} → ${newFile.path}`);
+        }
+        else {
+            console.warn(`[architect] 无法为新文件 ${newFile.path} 找到合适的父文件，可能无法在页面上显示`);
+        }
+    }
+    return { files, crossFileRefs, injectedParents };
+}
+/**
+ * 为新文件查找最可能的父文件
+ * 策略：同目录/父目录下的已有文件 > 路由文件 > 列表组件
+ */
+function findLikelyParent(newFilePath, plan, archFiles, sandboxPath) {
+    const newDir = newFilePath.split('/').slice(0, -1).join('/');
+    const newBaseName = newFilePath.split('/').pop()?.replace(/\.(jsx?|tsx?|vue)$/, '') ?? '';
+    // 候选池：plan 中的已有文件 + architect 中 action:'modify' 的文件
+    const candidates = new Set();
+    for (const f of plan)
+        candidates.add(f.path);
+    for (const f of archFiles) {
+        if (f.action === 'modify' || f.action === 'delete')
+            candidates.add(f.path);
+    }
+    // 排除新文件自身
+    candidates.delete(newFilePath);
+    const scored = [];
+    for (const candidate of candidates) {
+        let score = 0;
+        // 同目录下的文件（如 CommentList.jsx 在 Comment/ 目录下）
+        const candidateDir = candidate.split('/').slice(0, -1).join('/');
+        if (candidateDir === newDir)
+            score += 10;
+        // 父目录下的文件（如 HomeArticles.jsx 在 routes/Home/ 下）
+        if (newDir.startsWith(candidateDir) || candidateDir.startsWith(newDir))
+            score += 5;
+        // 路由文件优先（routes/ 目录）
+        if (candidate.includes('/routes/'))
+            score += 8;
+        // 列表组件优先（名称包含 List）
+        if (candidate.includes('List'))
+            score += 6;
+        // 名称相关性：新文件名是候选名的子集或反之
+        const candidateBaseName = candidate.split('/').pop()?.replace(/\.(jsx?|tsx?|vue)$/, '') ?? '';
+        if (candidateBaseName.includes(newBaseName) || newBaseName.includes(candidateBaseName))
+            score += 4;
+        // 父级组件目录匹配（新文件在 components/X/ 下，候选是同级或父级组件）
+        const newComponents = newDir.split('/');
+        const candidateComponents = candidateDir.split('/');
+        const sharedPrefix = newComponents.filter((_, i) => newComponents[i] === candidateComponents[i]).length;
+        score += sharedPrefix;
+        if (score > 0)
+            scored.push({ path: candidate, score });
+    }
+    // 按分数排序，返回最高分的候选
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0]?.path ?? null;
+}
+/**
+ * 计算相对导入路径
+ */
+function getRelativeImportPath(fromFile, toFile) {
+    const fromParts = fromFile.split('/').slice(0, -1);
+    const toParts = toFile.split('/');
+    // 找到公共前缀
+    let commonLen = 0;
+    while (commonLen < fromParts.length && commonLen < toParts.length && fromParts[commonLen] === toParts[commonLen]) {
+        commonLen++;
+    }
+    const upCount = fromParts.length - commonLen;
+    const relParts = toParts.slice(commonLen);
+    const prefix = upCount > 0 ? '../'.repeat(upCount) : './';
+    const result = prefix + relParts.join('/');
+    // 去掉扩展名
+    return result.replace(/\.(jsx?|tsx|vue)$/, '');
+}
+// ============================================================
+// 正则分批（降级方案，LLM 失败时使用）
 // ============================================================
 /**
  * 从 import 语句中解析出引用的模块路径
@@ -208,8 +540,9 @@ function topologicalBatches(plan, graph) {
     return batches;
 }
 /**
- * 主入口：基于依赖分析的纯代码分批
+ * 降级入口：基于依赖分析的纯代码分批
  * 零 LLM 消耗，确定性执行，不会失败
+ * 当 LLM Architect 失败时作为 fallback 使用
  */
 export async function buildBatches(sandboxPath, plan) {
     // 提取文件接口

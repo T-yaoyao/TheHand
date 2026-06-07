@@ -101,6 +101,28 @@ export interface ChangeBatch {
     files: string[];
     reason: string;
 }
+/** Architect Agent 输出的单文件分析 */
+export interface ArchitectFileAnalysis {
+    path: string;
+    action: 'create' | 'modify' | 'delete';
+    detailedChange: string;
+    dependencies: string[];
+    exports: string[];
+    priority: number;
+}
+/** 跨文件引用关系 */
+export interface CrossFileRef {
+    from: string;
+    to: string;
+    ref: string;
+}
+/** Architect Agent 完整输出 */
+export interface ArchitectOutput {
+    globalContext: string;
+    files: ArchitectFileAnalysis[];
+    crossFileRefs: CrossFileRef[];
+    batches: ChangeBatch[];
+}
 export interface Tool {
     name: string;
     description: string;
