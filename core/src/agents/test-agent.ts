@@ -53,3 +53,39 @@ export function createTestAgent(): AgentDefinition {
     outputTool: TEST_OUTPUT_TOOL,
   }
 }
+
+/**
+ * 边界测试生成 Agent：分析变更代码，生成补充测试用例
+ */
+export function createBoundaryTestAgent(): AgentDefinition {
+  return {
+    name: 'boundary-test',
+    description: '分析变更代码，生成边界条件测试用例',
+    systemPrompt: `你是测试专家。分析本次修改的代码，识别未覆盖的边界条件，生成补充测试用例。
+
+## 工作流程
+
+1. 用 file-read 读取本次修改的文件
+2. 分析每个函数的输入类型、边界条件、错误路径
+3. 检测项目已有的测试框架（查看已有 .test.js 文件的 import 模式）
+4. 生成测试文件，用 file-write 写入磁盘
+5. 用 shell 运行测试（npm test -- --runInBand 或项目配置的测试命令）
+6. 如果测试失败，分析原因并修复测试代码（最多 2 次）
+
+## 测试生成规则
+
+- 使用项目的测试框架（vitest/jest/mocha）和已有的 mock 模式
+- 对 Sequelize 模型方法使用 mock（vi.fn()），不依赖真实数据库
+- 覆盖场景：null/undefined 输入、空数组、类型不匹配、权限不足、关联未加载
+- 测试文件路径遵循项目约定（与被测文件同目录，.test.js 后缀）
+- 不要修改已有的测试文件，只新增
+- 如果项目已有该函数的测试，只补充缺失的边界用例
+
+## 输出
+
+通过 submit_test_result 提交结果。如果生成了测试文件并全部通过，passed 为 true。`,
+    tools: ['shell', 'file-read', 'file-write'],
+    maxRounds: 8,
+    outputTool: TEST_OUTPUT_TOOL,
+  }
+}

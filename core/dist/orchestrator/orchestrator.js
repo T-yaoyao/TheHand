@@ -1,6 +1,7 @@
 import { runClarification } from '../agents/clarification-agent.js';
 import { createPlanAgent } from '../agents/plan-agent.js';
-import { runCodingBatch, extractInterfaceSummary } from '../agents/coding-agent.js';
+import { createBoundaryTestAgent } from '../agents/test-agent.js';
+import { runCodingBatch, extractInterfaceSummary, extractAvailableDependencies, validateImports } from '../agents/coding-agent.js';
 import { buildBatches, extractFileInterfaces, runArchitect } from '../agents/architect-agent.js';
 import { join, dirname } from 'path';
 import { TestRunner } from '../git-ops/test-runner.js';
@@ -512,6 +513,30 @@ export class Orchestrator {
                 }
             }
             // ──────────────────────────────────────────────────────────────
+            // 依赖合法性校验：检测生成代码是否使用了未安装的第三方库
+            // ──────────────────────────────────────────────────────────────
+            {
+                const availableDeps = await extractAvailableDependencies(sandbox.path);
+                const violations = validateImports(codeOutputs, availableDeps);
+                if (violations.length > 0) {
+                    const violationMsg = violations.map(v => `${v.file}: import '${v.imp}'`).join('\n');
+                    const errorMsg = `使用了未安装的依赖库：\n${violationMsg}\n\n` +
+                        `请移除这些 import，用已安装的库或原生 JavaScript/CSS 替代。`;
+                    codeErrors.push(`第${codeAttempt}轮: ${errorMsg}`);
+                    yield {
+                        type: 'executing',
+                        phase: `dependency violation: ${violations.map(v => v.imp).join(', ')}`,
+                        progress: 50,
+                        warnings: [errorMsg],
+                    };
+                    // 回滚本轮改动，进入下轮重试
+                    if (executor) {
+                        await executor('git checkout . && git clean -fd', { timeout: 30_000 }).catch(() => { });
+                    }
+                    continue;
+                }
+            }
+            // ──────────────────────────────────────────────────────────────
             // 分级告警兜底机制 v1.0
             // 从"静默兜底"升级为"三级分级处理"，彻底杜绝静默失败
             // ──────────────────────────────────────────────────────────────
@@ -711,6 +736,10 @@ export class Orchestrator {
                     return false; // index.js barrel export 不参与检测
                 if (skipOrphanImportIntegrationCheck(f.path, projectContext.thehand?.orphanGuard))
                     return false; // Vite/React 入口不会被 JS import
+                // 后端文件（models/routes/services）由 ORM/框架动态加载，不依赖直接 import，跳过孤立检测
+                const backendDir = projectContext.structure.backend?.replace(/\/$/, '') || 'backend';
+                if (f.path.startsWith(backendDir + '/') || f.path === backendDir)
+                    return false;
                 // 只检测被生成了的文件
                 return fileMap.has(f.path);
             });
@@ -1083,6 +1112,55 @@ export class Orchestrator {
                     }
                     catch { }
                 }
+                // ── 边界测试生成：分析变更代码，生成补充测试用例 ──
+                try {
+                    yield { type: 'executing', phase: 'generating boundary tests', progress: 75 };
+                    const changedFiles = codeOutputs.filter(f => f.path && f.content !== '__DELETE__').map(f => f.path).join(', ');
+                    const boundaryTestContext = `本次修改的文件：${changedFiles}\n\n` +
+                        `请分析这些文件中的函数，为未覆盖的边界条件生成测试用例。\n` +
+                        `项目测试命令：${commands.test}\n` +
+                        `已有测试文件：查看项目中已有的 .test.js 文件了解测试框架和 mock 模式。`;
+                    const boundaryTestResult = await this.deps.agentRunner.run(createBoundaryTestAgent(), {
+                        requirement: { ...requirement, pmInput: boundaryTestContext },
+                        projectContext,
+                        memory: await requirementMemory.getContext(requirement.id, projectContext),
+                    });
+                    if (boundaryTestResult.status === 'success') {
+                        yield {
+                            type: 'executing',
+                            phase: 'boundary tests generated, running...',
+                            progress: 78,
+                        };
+                        // 运行完整测试套件（包含新生成的边界测试）
+                        const fullTestResult = await testRunner.run({
+                            lint: commands.lint,
+                            test: commands.test,
+                            build: commands.build,
+                        });
+                        yield {
+                            type: 'test-result',
+                            passed: fullTestResult.passed,
+                            details: JSON.stringify(fullTestResult, null, 2),
+                        };
+                        if (!fullTestResult.passed) {
+                            // 边界测试发现问题，记录但不阻断（边界测试是补充性的）
+                            yield {
+                                type: 'executing',
+                                phase: 'boundary tests found issues (non-blocking)',
+                                progress: 80,
+                                warnings: [`边界测试未全部通过：${fullTestResult.steps.filter(s => !s.passed).map(s => s.name).join(', ')}`],
+                            };
+                        }
+                    }
+                }
+                catch (boundaryErr) {
+                    // 边界测试生成失败不阻断主流程
+                    yield {
+                        type: 'executing',
+                        phase: `boundary test generation skipped: ${boundaryErr.message?.slice(0, 100)}`,
+                        progress: 78,
+                    };
+                }
                 break;
             }
             // ── 构建增强版 testError：完整错误 + 错误相关文件内容 ──
@@ -1090,6 +1168,27 @@ export class Orchestrator {
                 .filter(s => !s.passed)
                 .map(s => `${s.name}: ${s.output}`) // 不截断，保留完整错误
                 .join('\n---\n');
+            // ── 错误分类：环境错误直接失败，不浪费重试次数 ──
+            const ENV_ERROR_PATTERNS = [
+                /GLIBC_\d+\.\d+.*not found/i,
+                /version.*GLIBC.*not found/i,
+                /Cannot find module.*\.node['"]/, // 原生模块加载失败
+                /node_sqlite3\.node/i, // sqlite3 原生模块
+                /\/lib\/.*\.so.*not found/i, // 共享库缺失
+                /Permission denied/i,
+                /ENOSPC.*no space left/i,
+                /ENOMEM.*out of memory/i,
+                /docker.*not found/i,
+                /Cannot find package 'sqlite3'/i,
+            ];
+            const isEnvError = ENV_ERROR_PATTERNS.some(p => p.test(errorOutput));
+            if (isEnvError) {
+                const envErrorMsg = `环境错误（非代码问题，重试无法解决）:\n${errorOutput.slice(0, 500)}`;
+                yield { type: 'failed', requirement, error: envErrorMsg, userMessage: `测试环境配置错误，非代码问题。请检查 Docker 沙箱的系统库版本或项目依赖配置。` };
+                requirement.status = 'failed';
+                await requirementMemory.saveRequirement(requirement);
+                return;
+            }
             // 从错误中提取涉及的源码文件路径，读取其内容作为上下文
             const errorFileContents = await extractAndReadErrorFiles(errorOutput, sandbox.path);
             if (errorFileContents.length > 0) {

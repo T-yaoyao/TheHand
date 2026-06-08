@@ -57,10 +57,10 @@ ${ctx.projectContext.constraints ? Object.entries(ctx.projectContext.constraints
 
 规则：
 - **直接输出方案**：项目上下文已提供完整的文件结构和模型定义，大多数情况下直接输出方案即可，不需要读取文件
-- 仅当目标文件不在项目上下文的 keyFiles 中时，才用 file-read 确认路径（最多读 1 个文件）
+- 仅当目标文件不在项目上下文的 keyFiles 中时，才用 file-read 确认路径
 - **新增/变更路由、Tab、顶层页面挂载**：遵守 \`constraints\` 与 \`thehand\`；须在 \`files\` 中写全须改的真实路径（含父布局、Navbar 等）。**凡动 routes/ 下页面且涉及 Tab/子 path/Outlet/NavItem**，将 \`includeRouteEntryContext\` 设为 \`true\`（首轮即并入 main 与 readContextCandidates），或直接把须改的 \`main.jsx\` 等列入 \`files\`；仅同一路由下纯组件内部改动、不增 path/Tab 时为 \`false\`
 - 修改已有组件时只改需要改的部分，不要整体重写组件
-- **⚠️ 绝对不要创建已有组件的替代品**：若上下文中已存在名称相近的组件，须直接修改已有文件，勿新建仅名称略不同的重复组件，否则易成为死代码
+- **绝对不要创建已有组件的替代品**：若上下文中已存在名称相近的组件，须直接修改已有文件，勿新建仅名称略不同的重复组件，否则易成为死代码
 - **新增组件/模块时，必须同时列出引用它的父级挂载点**（路由页、列表容器、布局等）：新增文件须被方案中至少一个已有文件通过 import 或项目约定的路由表挂接，否则用户看不到效果
 - **删除操作（delete_page/delete_field）必须列出所有受影响文件**：不仅是直接操作的文件，还要包括 import 它的路由文件、引用它的导航组件、导出它的 index 文件等
 - 删除页面时，至少需要列出：导航组件（删链接）、路由文件（删 import + route 定义）、页面组件文件（删除）

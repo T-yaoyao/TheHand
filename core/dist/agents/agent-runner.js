@@ -89,6 +89,10 @@ export class AgentRunner {
                 // 执行每个 tool call，将结果加入消息
                 for (const tc of response.toolCalls) {
                     const tool = tools.find(t => t.name === tc.name);
+                    const argsPreview = typeof tc.arguments === 'string'
+                        ? tc.arguments.slice(0, 200)
+                        : JSON.stringify(tc.arguments ?? {}).slice(0, 200);
+                    console.log(`[agent:${agent.name}] round=${rounds} tool=${tc.name} args=${argsPreview}`);
                     let toolResult;
                     if (tool) {
                         try {
@@ -114,6 +118,7 @@ export class AgentRunner {
                     else {
                         toolResult = `Unknown tool: ${tc.name}`;
                     }
+                    console.log(`[agent:${agent.name}] tool=${tc.name} resultLen=${toolResult.length}`);
                     messages.push({
                         role: 'user',
                         content: `Tool result for ${tc.name}:\n${toolResult}`,

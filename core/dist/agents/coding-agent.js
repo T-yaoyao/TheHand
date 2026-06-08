@@ -127,6 +127,12 @@ export async function runCoding(llmClient, promptManager, plan, sandboxPath, pro
     // 读取关键上下文文件（路由入口、App、package.json 等，可由 project.json thehand.readContextCandidates 追加）
     const contextFiles = await readContextFiles(sandboxPath, projectContext);
     let contextHint = '';
+    // 提取可用依赖列表，强制注入 prompt
+    const availableDeps = await extractAvailableDependencies(sandboxPath);
+    const depsList = [...availableDeps].sort().join(', ');
+    const depsHint = availableDeps.size > 0
+        ? `\n\n## ⚠️ 可用依赖（只允许 import 以下包，禁止使用其他第三方库）\n${depsList}\n\n如果需要的库不在上面的列表中，用原生 JavaScript/CSS 实现，或使用列表中已有的替代方案。`
+        : '';
     if (contextFiles.length > 0) {
         contextHint = '\n\n## 关键上下文文件\n' + contextFiles.join('\n\n');
     }
@@ -154,7 +160,7 @@ ${projectTree}
 
 ## 各文件原始内容
 ${fileContexts.join('\n\n')}
-${contextHint}${l1Section}${constraintsHint}${errorHint}
+${contextHint}${l1Section}${constraintsHint}${depsHint}${errorHint}
 
 请输出所有文件的修改结果，JSON 数组格式。`;
     // Function Calling 优先路径
@@ -259,13 +265,19 @@ architectFiles, crossFileRefs, globalContext) {
         }
     }
     const l1Section = await formatL1RecallSection(sandboxPath, projectContext, batch.files);
+    // 提取可用依赖列表
+    const availableDeps = await extractAvailableDependencies(sandboxPath);
+    const depsList = [...availableDeps].sort().join(', ');
+    const depsHint = availableDeps.size > 0
+        ? `\n\n## ⚠️ 可用依赖（只允许 import 以下包，禁止使用其他第三方库）\n${depsList}\n\n如果需要的库不在上面的列表中，用原生 JavaScript/CSS 实现，或使用列表中已有的替代方案。`
+        : '';
     const userMessage = `## 本批次需要生成的文件
 ${batch.files.join(', ')}
 ${globalContextHint}
 ${CODING_USER_EDIT_STRATEGY}
 ## 各文件原始内容和改动指令
 ${fileContexts.join('\n\n')}
-${generatedSummaryHint}${crossRefHint}${l1Section}${constraintsHint}${errorHint ? '\n\n' + errorHint : ''}
+${generatedSummaryHint}${crossRefHint}${l1Section}${constraintsHint}${depsHint}${errorHint ? '\n\n' + errorHint : ''}
 
 请输出本批次所有文件的修改结果，JSON 数组格式。`;
     const messages = [
@@ -469,6 +481,54 @@ async function readContextFiles(sandboxPath, projectContext) {
         catch { }
     }
     return contextFiles;
+}
+/**
+ * 从沙箱中的 package.json 文件提取所有可用依赖名
+ */
+export async function extractAvailableDependencies(sandboxPath) {
+    const deps = new Set();
+    const pkgPaths = ['package.json', 'frontend/package.json', 'backend/package.json'];
+    for (const pkgPath of pkgPaths) {
+        try {
+            const content = await readFile(join(sandboxPath, pkgPath), 'utf-8');
+            const pkg = JSON.parse(content);
+            for (const name of Object.keys(pkg.dependencies ?? {}))
+                deps.add(name);
+            for (const name of Object.keys(pkg.devDependencies ?? {}))
+                deps.add(name);
+        }
+        catch { }
+    }
+    return deps;
+}
+/**
+ * 验证生成的代码是否使用了未安装的依赖
+ * 返回违规的 import 列表（空数组表示全部合法）
+ */
+export function validateImports(outputs, availableDeps) {
+    const violations = [];
+    // 匹配 import ... from 'xxx' 和 require('xxx')
+    const importRegex = /(?:import\s+.*?from\s+['"]([^'"]+)['"]|require\s*\(\s*['"]([^'"]+)['"]\s*\))/g;
+    for (const file of outputs) {
+        if (file.content === '__DELETE__')
+            continue;
+        if (!/\.(jsx?|tsx?|mjs|cjs|vue)$/.test(file.path))
+            continue;
+        let match;
+        while ((match = importRegex.exec(file.content)) !== null) {
+            const imp = match[1] ?? match[2];
+            // 跳过相对路径和 node: 内置模块
+            if (imp.startsWith('.') || imp.startsWith('node:'))
+                continue;
+            // 提取包名（scoped package 取前两段，普通包取第一段）
+            const parts = imp.split('/');
+            const pkgName = parts[0].startsWith('@') ? `${parts[0]}/${parts[1]}` : parts[0];
+            if (!availableDeps.has(pkgName)) {
+                violations.push({ file: file.path, imp: pkgName });
+            }
+        }
+    }
+    return violations;
 }
 /**
  * 解析单文件编码结果（兼容旧接口，已 deprecated）

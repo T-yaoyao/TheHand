@@ -34,6 +34,18 @@ export declare function runCodingBatch(llmClient: LLMClient, promptManager: Prom
  */
 export declare function extractInterfaceSummary(output: CodeFileOutput): string;
 /**
+ * 从沙箱中的 package.json 文件提取所有可用依赖名
+ */
+export declare function extractAvailableDependencies(sandboxPath: string): Promise<Set<string>>;
+/**
+ * 验证生成的代码是否使用了未安装的依赖
+ * 返回违规的 import 列表（空数组表示全部合法）
+ */
+export declare function validateImports(outputs: CodeFileOutput[], availableDeps: Set<string>): {
+    file: string;
+    imp: string;
+}[];
+/**
  * 解析单文件编码结果（兼容旧接口，已 deprecated）
  * @deprecated 请使用 Function Calling 批量获取文件
  */
