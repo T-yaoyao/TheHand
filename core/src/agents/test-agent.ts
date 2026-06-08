@@ -85,7 +85,7 @@ export function createBoundaryTestAgent(): AgentDefinition {
 
 通过 submit_test_result 提交结果。如果生成了测试文件并全部通过，passed 为 true。`,
     tools: ['shell', 'file-read', 'file-write'],
-    maxRounds: 8,
+    maxRounds: 30,
     outputTool: TEST_OUTPUT_TOOL,
   }
 }

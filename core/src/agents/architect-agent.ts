@@ -266,6 +266,38 @@ ${fileInterfaceText}
     return null
   }
 
+  // 7. 修复畸形输出
+  // 7a. 修复 files 字段：确保每个 batch 的 files 是数组
+  let repairCount = 0
+  for (const batch of output.batches) {
+    if (typeof batch.files === 'string') {
+      batch.files = [batch.files]
+      repairCount++
+    } else if (!Array.isArray(batch.files)) {
+      batch.files = []
+      repairCount++
+    }
+  }
+  if (repairCount > 0) {
+    console.warn(`[architect] 修复了 ${repairCount} 个畸形 batch.files 字段`)
+  }
+
+  // 7b. 合并过多的 batches（LLM 有时返回过多 batch，如 18 个 batch 对应 9 个文件）
+  const MAX_BATCHES = Math.max(plan.length, 5)  // 最多不超过 plan 文件数或 5
+  if (output.batches.length > MAX_BATCHES) {
+    console.warn(`[architect] batches 过多 (${output.batches.length})，合并为 ${MAX_BATCHES} 个`)
+    const merged: typeof output.batches = []
+    const perBatch = Math.ceil(output.batches.length / MAX_BATCHES)
+    for (let i = 0; i < output.batches.length; i += perBatch) {
+      const group = output.batches.slice(i, i + perBatch)
+      merged.push({
+        files: group.flatMap(b => b.files),
+        reason: group.map(b => b.reason).filter(Boolean).join('; ') || '合并过多 batches',
+      })
+    }
+    output.batches = merged
+  }
+
   // 确保 batches 覆盖所有 plan 文件
   const batchFileSet = new Set(output.batches.flatMap(b => b.files))
   const planFileSet = new Set(plan.map(f => f.path))

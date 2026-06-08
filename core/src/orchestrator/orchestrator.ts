@@ -506,6 +506,9 @@ export class Orchestrator {
     let previousOutputs: { path: string; content: string; summary: string }[] = []
     let finalFileValidationSummary: FileValidationSummary | null = null
 
+    // 重试时追踪失败文件，用于精简上下文
+    const failedFiles = new Set<string>()
+
     /** 静态校验失败时须纳入后续轮次 plan 的路径（否则报错在 main.jsx 但方案只有子页，重试永远无法改到入口文件） */
     const staticGuardInjectPaths = new Set<string>()
     const mergePlanWithInjections = (base: FilePlan[]): FilePlan[] => {
@@ -541,8 +544,41 @@ export class Orchestrator {
         const skillOutputs = await skill.execute(requirement.structuredRequirement!, projectContext)
         codeOutputs = skillOutputs.map(o => ({ path: o.path, content: o.content, summary: o.summary }))
       } else {
-        const planFiles = mergePlanWithInjections(requirement.plan ?? [])
+        let planFiles = mergePlanWithInjections(requirement.plan ?? [])
         const lastTestError = codeErrors.length > 0 ? codeErrors[codeErrors.length - 1] : undefined
+
+        // ── 重试时精简上下文：只重传失败文件，注入沙箱文件列表 ──
+        let sandboxFileListHint = ''
+        if (codeAttempt > 1 && failedFiles.size > 0) {
+          // 只重传失败的文件，已通过的文件从 plan 中移除
+          const passedFiles = planFiles.filter(f => !failedFiles.has(f.path))
+          planFiles = planFiles.filter(f => failedFiles.has(f.path))
+          if (planFiles.length === 0) {
+            // 所有文件都通过了校验，但测试失败了 → 重传全部
+            planFiles = mergePlanWithInjections(requirement.plan ?? [])
+          } else {
+            console.log(`[coding] 重试精简: ${passedFiles.length} 个文件已通过，只重传 ${planFiles.length} 个失败文件: ${planFiles.map(f => f.path).join(', ')}`)
+          }
+
+          // 注入沙箱文件列表，防止 Agent 幻觉不存在的路径
+          try {
+            const { execSync } = await import('child_process')
+            const fileList = execSync('find . -type f \\( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" -o -name "*.json" \\) | grep -v node_modules | grep -v .git | sort', {
+              cwd: sandbox.path,
+              timeout: 5_000,
+              encoding: 'utf-8',
+            }).slice(0, 3000)
+            sandboxFileListHint = `\n\n## ⚠️ 沙箱中实际存在的文件（import 路径必须指向这些文件）\n\`\`\`\n${fileList}\`\`\``
+          } catch {}
+
+          // 注入可用依赖列表
+          const { extractAvailableDependencies } = await import('../agents/coding-agent.js')
+          const availableDeps = await extractAvailableDependencies(sandbox.path)
+          if (availableDeps.size > 0) {
+            sandboxFileListHint += `\n\n## ⚠️ 可用依赖（只允许 import 以下包）\n${[...availableDeps].sort().join(', ')}`
+          }
+        }
+
         const errorHintCombined = [
           codingHint || '',
           codingRegressionHint,
@@ -550,6 +586,7 @@ export class Orchestrator {
           codeAttempt > 1 && previousOutputs.length > 0
             ? '\n\n## 上轮生成的代码（仅供参考）\n' + previousOutputs.map(f => `- ${f.path}: ${f.summary}`).join('\n')
             : '',
+          sandboxFileListHint,
         ].filter(Boolean).join('')
 
         if (false) {
@@ -560,17 +597,24 @@ export class Orchestrator {
           // 始终走 LLM Architect 分析依赖 + 分批生成
           yield { type: 'executing', phase: `architect analyzing ${planFiles.length} files...`, progress: 32 }
 
-          // 尝试 LLM Architect 分析，失败则降级到正则分批
-          try {
-            if (requirement.structuredRequirement) {
-              architectOutput = await runArchitect(
-                this.deps.agentRunner, promptManager, planFiles, sandbox.path,
-                projectContext, requirement.structuredRequirement,
-              )
+          // 尝试 LLM Architect 分析，失败则重试一次，仍失败则降级到正则分批
+          for (let archAttempt = 1; archAttempt <= 2; archAttempt++) {
+            try {
+              if (requirement.structuredRequirement) {
+                architectOutput = await runArchitect(
+                  this.deps.agentRunner, promptManager, planFiles, sandbox.path,
+                  projectContext, requirement.structuredRequirement,
+                )
+              }
+              if (architectOutput) break  // 成功，跳出重试循环
+            } catch (archErr: any) {
+              console.warn(`[architect] 第 ${archAttempt} 次分析异常:`, archErr.message)
+              yield { type: 'executing', phase: `architect 异常 (${archAttempt}/2): ${archErr.message?.slice(0, 100) ?? 'unknown'}`, progress: 33, warnings: ['LLM 依赖分析异常'] }
             }
-          } catch (archErr: any) {
-            console.warn('[architect] LLM 分析异常，降级到正则分批:', archErr.message)
-            yield { type: 'executing', phase: `architect 异常: ${archErr.message?.slice(0, 100) ?? 'unknown'}`, progress: 33, warnings: ['LLM 依赖分析异常，将降级到正则分批'] }
+            if (archAttempt < 2) {
+              console.log('[architect] 重试 Architect 分析...')
+              yield { type: 'executing', phase: 'architect 重试中...', progress: 33 }
+            }
           }
 
           let batches, fileInterfaces
@@ -580,11 +624,24 @@ export class Orchestrator {
             fileInterfaces = await extractFileInterfaces(sandbox.path, planFiles)
             yield { type: 'executing', phase: `architect: ${batches.length} batches, ${architectOutput.crossFileRefs.length} cross-refs`, progress: 34 }
           } else {
-            // 降级：正则分批
+            // 降级：正则分批（限制每批 ≤ 3 个文件）
             console.log('[batching] 降级到正则分批')
             const fallback = await buildBatches(sandbox.path, planFiles)
             batches = fallback.batches
             fileInterfaces = fallback.fileInterfaces
+            // 拆分过大的 batch
+            const MAX_BATCH_SIZE = 3
+            const normalized: typeof batches = []
+            for (const batch of batches) {
+              if (batch.files.length <= MAX_BATCH_SIZE) {
+                normalized.push(batch)
+              } else {
+                for (let i = 0; i < batch.files.length; i += MAX_BATCH_SIZE) {
+                  normalized.push({ files: batch.files.slice(i, i + MAX_BATCH_SIZE), reason: `${batch.reason}（拆分）` })
+                }
+              }
+            }
+            batches = normalized
             yield { type: 'executing', phase: `architect 失败，降级到正则分批: ${batches.length} batches`, progress: 34, warnings: ['LLM 依赖分析未生效，使用正则分批'] }
           }
           console.log(`[batching] ${batches.length} batches: ${batches.map(b => `[${b.files.join(', ')}]`).join(' → ')}`)
@@ -647,6 +704,10 @@ export class Orchestrator {
           const errorMsg = `使用了未安装的依赖库：\n${violationMsg}\n\n` +
             `请移除这些 import，用已安装的库或原生 JavaScript/CSS 替代。`
           codeErrors.push(`第${codeAttempt}轮: ${errorMsg}`)
+          // 追踪失败文件
+          for (const v of violations) {
+            failedFiles.add(v.file)
+          }
           yield {
             type: 'executing',
             phase: `dependency violation: ${violations.map(v => v.imp).join(', ')}`,
@@ -667,6 +728,10 @@ export class Orchestrator {
       // ──────────────────────────────────────────────────────────────
       yield { type: 'executing', phase: 'validating-files', progress: 50 }
       const planFilesFull = mergePlanWithInjections(requirement.plan ?? [])
+      // 重试模式下，只验证失败文件，不验证已通过的文件
+      const planFilesToValidate = codeAttempt > 1 && failedFiles.size > 0
+        ? planFilesFull.filter(f => failedFiles.has(f.path))
+        : planFilesFull
       const { readFile } = await import('fs/promises')
 
       // ── 辅助判定函数 ──
@@ -704,7 +769,7 @@ export class Orchestrator {
       const fallbackOriginal: string[] = []
       const criticalMissing: string[] = []
 
-      for (const planFile of planFilesFull) {
+      for (const planFile of planFilesToValidate) {
         if (fileMap.has(planFile.path)) {
           fullyGenerated.push(planFile.path)
           continue
@@ -742,7 +807,7 @@ export class Orchestrator {
 
       // ── 3. 生成文件校验摘要事件 ──
       const fileValidationSummary: FileValidationSummary = {
-        totalPlanFiles: planFilesFull.length,
+        totalPlanFiles: planFilesToValidate.length,
         fullyGenerated,
         fallbackOriginal,
         noChangeDetected: [],
@@ -788,7 +853,7 @@ export class Orchestrator {
       const SRC_FOR_REGRESSION = /\.(jsx?|tsx|vue)$/
       if (process.env.THEHAND_DISABLE_REGRESSION_GUARD !== '1') {
         const regressions: { path: string; reasons: string[] }[] = []
-        for (const planFile of planFilesFull) {
+        for (const planFile of planFilesToValidate) {
           if (!SRC_FOR_REGRESSION.test(planFile.path)) continue
           const out = fileMap.get(planFile.path)
           if (!out?.content || out.content === '__DELETE__') continue
@@ -861,7 +926,7 @@ export class Orchestrator {
       const STYLE_ASSET_EXTS = /\.(css|scss|less|svg|png|jpg|json)$/
       const BARREL_EXTS = /\/index\.(jsx?|tsx|js|ts)$/
 
-      const generatedComponentFiles = planFilesFull.filter(f => {
+      const generatedComponentFiles = planFilesToValidate.filter(f => {
         if (STYLE_ASSET_EXTS.test(f.path)) return false
         if (!COMPONENT_EXTS.test(f.path)) return false
         if (BARREL_EXTS.test(f.path)) return false // index.js barrel export 不参与检测
@@ -924,17 +989,56 @@ export class Orchestrator {
                 )
               }
             } else {
+              // 智能推荐父文件：优先同目录 > 同层级前端文件 > 语义匹配
               const nfDir = normPath.split('/').slice(0, -1).join('/')
-              const likelyParent = planFilesFull.find(f => {
+              const nfSegments = nfDir.split('/')
+
+              // 排除自身、样式文件、barrel export、后端文件
+              const candidates = planFilesFull.filter(f => {
                 if (f.path === nf.path) return false
                 if (STYLE_ASSET_EXTS.test(f.path)) return false
                 if (BARREL_EXTS.test(f.path)) return false
-                const fDir = f.path.split('/').slice(0, -1).join('/')
-                if (fDir === nfDir) return false
-                return f.path.includes('/routes/') || f.path.includes('List') ||
-                       f.path.includes('Section') || f.path.includes('Home') ||
-                       f.path.includes('Page') || f.path.includes('View')
+                // 排除后端文件作为前端文件的父文件
+                const fBackendDir = projectContext.structure.backend?.replace(/\/$/, '') || 'backend'
+                if (f.path.startsWith(fBackendDir + '/')) return false
+                return true
               })
+
+              let likelyParent: typeof candidates[0] | undefined
+
+              // 优先级 1：同目录下的组件/页面文件（如 ArticleEditorForm 引入 getDrafts）
+              const sameDirParent = candidates.find(f => {
+                const fDir = f.path.split('/').slice(0, -1).join('/')
+                return fDir === nfDir && (f.path.includes('Component') || f.path.includes('Form') || f.path.includes('Page') || f.path.includes('View') || f.path.includes('Route'))
+              })
+              if (sameDirParent) {
+                likelyParent = sameDirParent
+              }
+
+              // 优先级 2：前端 routes/ 下的页面文件（按路径层级匹配）
+              if (!likelyParent) {
+                likelyParent = candidates.find(f => {
+                  return f.path.includes('/routes/') && f.path.includes('/' + nfSegments[nfSegments.length - 2] + '/')
+                })
+              }
+
+              // 优先级 3：任何前端组件文件（List/Section/Home/Page/View/Form）
+              if (!likelyParent) {
+                likelyParent = candidates.find(f => {
+                  return f.path.includes('List') || f.path.includes('Section') ||
+                         f.path.includes('Home') || f.path.includes('Page') ||
+                         f.path.includes('View') || f.path.includes('Form')
+                })
+              }
+
+              // 优先级 4：同目录下的任何文件
+              if (!likelyParent) {
+                likelyParent = candidates.find(f => {
+                  const fDir = f.path.split('/').slice(0, -1).join('/')
+                  return fDir === nfDir
+                })
+              }
+
               if (likelyParent) {
                 orphanHints.push(`${nf.path} 未被 import，必须同时修改 ${likelyParent.path} 来 import 并使用它`)
               } else {
@@ -947,6 +1051,10 @@ export class Orchestrator {
         if (orphanFiles.length > 0) {
           const err = `组件孤立（未被父组件 import）:\n${orphanHints.join('\n')}`
           codeErrors.push(`第${codeAttempt}轮: ${err}`)
+          // 追踪失败文件：孤立文件 + 推荐的父文件都需要在重试中处理
+          for (const of of orphanFiles) {
+            failedFiles.add(of)
+          }
           yield {
             type: 'executing',
             phase: `orphan-files: ${orphanFiles.length} 个组件未被引用`,
@@ -1042,6 +1150,10 @@ export class Orchestrator {
           const hints = importViolations.map(v => v.message)
           const err = `相对 import 无法解析:\n${hints.join('\n')}`
           codeErrors.push(`第${codeAttempt}轮: ${err}`)
+          // 追踪失败文件，用于重试时精简上下文
+          for (const v of importViolations) {
+            if (v.fromPath) failedFiles.add(v.fromPath)
+          }
           yield {
             type: 'executing',
             phase: `relative-import-resolve: ${importViolations.length} 处 import 目标不存在`,
@@ -1084,7 +1196,7 @@ export class Orchestrator {
 
       // ── 6. 最终结果校验 ──
       const validOutputs = Array.from(fileMap.values())
-      console.log(`[coding] 文件校验完成: 总plan=${planFilesFull.length}, 正常生成=${fullyGenerated.length}, 兜底=${fallbackOriginal.length}`)
+      console.log(`[coding] 文件校验完成: 总plan=${planFilesToValidate.length}, 正常生成=${fullyGenerated.length}, 兜底=${fallbackOriginal.length}`)
 
       if (validOutputs.length === 0) {
         const err = '编码阶段未生成有效文件'
