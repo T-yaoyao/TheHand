@@ -9,9 +9,10 @@ import { Sidebar } from './components/Sidebar'
 import { StatusFlow } from './components/StatusFlow'
 import { StatusBadge } from './components/StatusBadge'
 import { PlanView } from './components/PlanView'
+import { ObservabilityPanel } from './components/ObservabilityPanel'
 import './App.css'
 
-type Tab = 'progress' | 'chat' | 'plan' | 'diff'
+type Tab = 'progress' | 'chat' | 'plan' | 'diff' | 'llm'
 
 export function App() {
   const [requirements, setRequirements] = useState<Requirement[]>([])
@@ -29,6 +30,9 @@ export function App() {
   const [toast, setToast] = useState<{ type: 'error' | 'success'; msg: string } | null>(null)
   const [errorBanner, setErrorBanner] = useState<string | null>(null)
   const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null)
+  /** 确认提交成功后，询问是否创建 PR（值为 requirement id） */
+  const [postCommitPrDialogId, setPostCommitPrDialogId] = useState<string | null>(null)
+  const [submittingPrChoice, setSubmittingPrChoice] = useState(false)
   const [thinking, setThinking] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -169,8 +173,7 @@ export function App() {
     if (latestEvent.type === 'orchestrator-started') {
       suppressAutoPlanTabRef.current = false
       setPendingApproval(false)
-      setSelected(prev => prev && prev.id === latestEvent.requirementId ? { ...prev, status: 'clarifying' } : prev)
-      setRequirements(prev => prev.map(r => r.id === latestEvent.requirementId ? { ...r, status: 'clarifying' } : r))
+      refreshList()
     }
     if (latestEvent.type === 'plan-ready') {
       setPendingApproval(true)
@@ -445,6 +448,7 @@ export function App() {
                   ['chat', '对话'],
                   ['plan', '方案'],
                   ['diff', '变更预览'],
+                  ['llm', 'LLM 观测'],
                 ] as const
               ).map(([key, label]) => (
                 <button
@@ -525,14 +529,20 @@ export function App() {
                         setThinking(true)
                         setPendingApproval(false)
                         setTab('progress')
+                        const rid = selected.id
+                        setSelected(prev => prev && prev.id === rid ? { ...prev, status: 'plan-approved' } : prev)
+                        setRequirements(prev => prev.map(r => r.id === rid ? { ...r, status: 'plan-approved' } : r))
                         try {
                           await api.approvePlan(selected.id)
+                          setThinking(false)
                           showToast('success', '方案已确认，开始编码')
                           await refreshList()
                         } catch (e: unknown) {
                           suppressAutoPlanTabRef.current = false
                           setTab('plan')
                           setPendingApproval(true)
+                          setSelected(prev => prev && prev.id === rid ? { ...prev, status: 'plan-ready' } : prev)
+                          setRequirements(prev => prev.map(r => r.id === rid ? { ...r, status: 'plan-ready' } : r))
                           showToast('error', e instanceof Error ? e.message : '确认失败')
                           setThinking(false)
                         } finally {
@@ -588,11 +598,18 @@ export function App() {
                         <button type="button" className="btn-primary" onClick={async () => {
                           setRunning(true)
                           setThinking(true)
+                          const rid = selected.id
                           try {
-                            await api.commitChanges(selected.id)
+                            await api.commitChanges(rid)
+                            setThinking(false)
+                            setSelected(prev => prev && prev.id === rid ? { ...prev, status: 'done' } : prev)
+                            setRequirements(prev => prev.map(r => r.id === rid ? { ...r, status: 'done' } : r))
+                            setDiffData(null)
                             showToast('success', '代码已提交，正在应用到源仓库')
-                            refreshList()
+                            await refreshList()
+                            reconnect()
                             setTab('progress')
+                            setPostCommitPrDialogId(rid)
                           } catch (e: unknown) {
                             showToast('error', e instanceof Error ? e.message : '提交失败')
                             setThinking(false)
@@ -622,6 +639,10 @@ export function App() {
                     <p className="empty-panel">暂无变更预览。编码并测试通过后，变更内容将显示在此处。</p>
                   )}
                 </div>
+              )}
+
+              {tab === 'llm' && (
+                <ObservabilityPanel requirementId={selected.id} />
               )}
             </div>
 
@@ -675,6 +696,63 @@ export function App() {
             <div className="modal-actions">
               <button type="button" className="btn-primary modal-confirm-btn" onClick={confirmDialog.onConfirm}>确定</button>
               <button type="button" className="btn-secondary" onClick={() => setConfirmDialog(null)}>取消</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {postCommitPrDialogId && (
+        <div className="modal-overlay">
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <p>
+              代码已写入源仓库。是否创建 <strong>Pull Request</strong>（目标分支：<strong>main</strong>）？
+            </p>
+            <p className="modal-hint">需要本机已安装并登录 GitHub CLI（<code>gh</code>），且远程仓库已配置 <code>origin</code>。</p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={submittingPrChoice}
+                onClick={async () => {
+                  const rid = postCommitPrDialogId
+                  if (!rid) return
+                  setSubmittingPrChoice(true)
+                  try {
+                    const r = await api.submitPrChoice(rid, true)
+                    setPostCommitPrDialogId(null)
+                    showToast('success', r.prUrl ? `PR 已创建：${r.prUrl}` : 'PR 已创建')
+                    await refreshList()
+                  } catch (e: unknown) {
+                    showToast('error', e instanceof Error ? e.message : '创建 PR 失败')
+                  } finally {
+                    setSubmittingPrChoice(false)
+                  }
+                }}
+              >
+                {submittingPrChoice ? '处理中…' : '创建 PR'}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={submittingPrChoice}
+                onClick={async () => {
+                  const rid = postCommitPrDialogId
+                  if (!rid) return
+                  setSubmittingPrChoice(true)
+                  try {
+                    await api.submitPrChoice(rid, false)
+                    setPostCommitPrDialogId(null)
+                    showToast('success', '已跳过创建 PR')
+                    await refreshList()
+                  } catch (e: unknown) {
+                    showToast('error', e instanceof Error ? e.message : '操作失败')
+                  } finally {
+                    setSubmittingPrChoice(false)
+                  }
+                }}
+              >
+                跳过
+              </button>
             </div>
           </div>
         </div>

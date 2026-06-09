@@ -6,6 +6,7 @@ import { resolveSandboxRepoAbs } from '@thehand/core'
 import { queryAll, queryOne, execute, executeBatch } from '../db.js'
 import { isOrchestratorRunning, runOrchestratorForRequirement } from '../orchestrator-runner.js'
 import { log } from '../logger.js'
+import { pushBranchAndCreatePrToMain } from '../pr-submit.js'
 
 function getSourceRepoRoot(): string {
   return resolveSandboxRepoAbs()
@@ -255,17 +256,21 @@ requirementsRouter.post('/:id/approve-plan', async (req: Request, res: Response)
   }
 
   log.info(`[api] 确认方案 id=${id.slice(0, 8)}…`)
-  try {
-    await runOrchestratorForRequirement(id)
-  } catch (e: any) {
-    if (e.message?.includes('正在运行中')) {
-      res.status(409).json({ error: '该需求正在运行中' })
-      return
-    }
-    log.error('[api] 确认方案触发失败:', e.message)
-    res.status(500).json({ error: `触发失败: ${e.message}` })
+  execute(
+    `UPDATE requirements SET status = 'plan-approved', updated_at = datetime('now') WHERE id = ? AND status = 'plan-ready'`,
+    [id],
+  )
+  const after = queryOne('SELECT status FROM requirements WHERE id = ?', [id]) as { status: string } | undefined
+  if (after?.status !== 'plan-approved') {
+    res.status(409).json({ error: '方案状态已变更或已被确认，请刷新页面' })
     return
   }
+
+  // 编排可能持续数分钟：勿阻塞 HTTP，前端依赖 SSE 更新进度
+  void runOrchestratorForRequirement(id).catch((e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e)
+    log.error('[api] 确认方案后台编排失败:', msg)
+  })
 
   res.json({ ok: true })
 })
@@ -330,6 +335,64 @@ requirementsRouter.post('/:id/commit', async (req: Request, res: Response) => {
   }
 
   res.json({ ok: true })
+})
+
+/**
+ * POST /api/requirements/:id/submit-pr — 提交完成后：选择是否创建指向 main 的 GitHub PR
+ * Body: { "create": true | false }
+ */
+requirementsRouter.post('/:id/submit-pr', (req: Request, res: Response) => {
+  const id = req.params.id as string
+  const create = req.body?.create === true
+
+  const requirement = queryOne('SELECT * FROM requirements WHERE id = ?', [id]) as
+    | {
+        status: string
+        pm_input: string
+        pr_url: string | null
+        pr_skipped: number | null
+      }
+    | undefined
+
+  if (!requirement) {
+    res.status(404).json({ error: '需求不存在' })
+    return
+  }
+  if (requirement.status !== 'done') {
+    res.status(400).json({ error: `当前状态 ${requirement.status} 不可操作 PR（需已完成提交）` })
+    return
+  }
+  if (requirement.pr_url) {
+    res.status(409).json({ error: '已创建过 PR', prUrl: requirement.pr_url })
+    return
+  }
+  if (requirement.pr_skipped === 1) {
+    res.status(409).json({ error: '已选择跳过创建 PR' })
+    return
+  }
+
+  if (!create) {
+    execute(`UPDATE requirements SET pr_skipped = 1, updated_at = datetime('now') WHERE id = ?`, [id])
+    log.info(`[api] 跳过 PR id=${id.slice(0, 8)}…`)
+    res.json({ ok: true, skipped: true })
+    return
+  }
+
+  const cwd = getSourceRepoRoot()
+  try {
+    const prUrl = pushBranchAndCreatePrToMain({
+      cwd,
+      requirementId: id,
+      pmInput: requirement.pm_input ?? '',
+    })
+    execute(`UPDATE requirements SET pr_url = ?, updated_at = datetime('now') WHERE id = ?`, [prUrl, id])
+    log.info(`[api] 已创建 PR id=${id.slice(0, 8)}… url=${prUrl}`)
+    res.json({ ok: true, prUrl })
+  } catch (e: any) {
+    const msg = e?.stderr?.toString?.() ?? e?.message ?? String(e)
+    log.error(`[api] 创建 PR 失败 id=${id.slice(0, 8)}…`, msg)
+    res.status(500).json({ error: `创建 PR 失败: ${msg}` })
+  }
 })
 
 /**

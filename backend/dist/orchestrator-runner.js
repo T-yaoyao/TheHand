@@ -2,8 +2,9 @@ import { resolve, join } from 'path';
 import { LLMClient, PromptManager, AgentRunner, SkillRegistry, DockerSandboxManager, ProjectMemory, Orchestrator, createFileReadTool, createFileWriteTool, createShellTool, resolveSandboxRepoAbs, resolveProjectsDir, getDefaultProjectId, } from '@thehand/core';
 import { DbRequirementMemory, loadRequirementFromDb } from './db-requirement-memory.js';
 import { execute, queryOne } from './db.js';
-import { pushEvent } from './routes/events.js';
+import { pushEvent, cleanupRequirement } from './routes/events.js';
 import { log } from './logger.js';
+import { appendLlmUsageRecord } from './llm-observability-log.js';
 const repoRoot = resolve(process.cwd(), '..');
 function getSandboxSourceRoot() {
     return resolveSandboxRepoAbs();
@@ -13,7 +14,18 @@ let depsPromise = null;
 async function getDeps() {
     if (!depsPromise) {
         depsPromise = (async () => {
-            const llmClient = new LLMClient();
+            const llmClient = new LLMClient({
+                hooks: {
+                    onUsage: (record) => {
+                        try {
+                            appendLlmUsageRecord(record);
+                        }
+                        catch (e) {
+                            log.warn('[llm-observability] 写入失败:', e instanceof Error ? e.message : e);
+                        }
+                    },
+                },
+            });
             const promptManager = new PromptManager(resolve(repoRoot, 'prompts'));
             const projectMemory = new ProjectMemory(resolveProjectsDir());
             const requirementMemory = new DbRequirementMemory();
@@ -65,6 +77,7 @@ export async function runOrchestratorForRequirement(requirementId, projectId = g
     }
     runningJobs.add(requirementId);
     const startedAt = Date.now();
+    const startedAtDate = new Date(); // 用于 getStatsSince 精确计算本次 run 的 token 消耗
     const previousStatus = requirement.status;
     // ── 重跑时重置状态：failed/done → clarifying ──
     if (previousStatus === 'failed' || previousStatus === 'done') {
@@ -74,16 +87,20 @@ export async function runOrchestratorForRequirement(requirementId, projectId = g
     }
     log.info(`[orchestrator] 开始 id=${requirementId.slice(0, 8)}… project=${projectId}`);
     log.info(`[orchestrator] PM: ${requirement.pmInput.slice(0, 80)}${requirement.pmInput.length > 80 ? '…' : ''}`);
-    pushEvent(requirementId, {
-        type: 'orchestrator-started',
-        requirementId,
-        projectId,
-    });
     // 状态由 orchestrator.run() yield 的 status-change 同步；勿在此推送 clarifying，
     // 否则与编排器首轮「澄清中」重复，且 plan-ready 续跑时会误发 clarifying。
     let eventCount = 0;
     try {
+        // 先完成冷启动（Skill 发现、Docker 等），再发 started，避免前端长时间停在「已启动但无后续事件」
         const { orchestrator, llmClient } = await getDeps();
+        llmClient.setObservabilityContext({ requirementId });
+        pushEvent(requirementId, {
+            type: 'orchestrator-started',
+            requirementId,
+            projectId,
+            phase: '编排引擎就绪，正在连接沙箱与加载项目上下文…',
+            progress: 2,
+        });
         for await (const event of orchestrator.run(requirement, projectId)) {
             eventCount++;
             pushEvent(requirementId, serializeEvent(event, requirementId));
@@ -96,7 +113,7 @@ export async function runOrchestratorForRequirement(requirementId, projectId = g
                 break;
             }
         }
-        const stats = llmClient.getStats();
+        const stats = llmClient.getStatsSince(startedAtDate); // 只统计本次 run 的 token，修复累积泄漏
         log.info(`[orchestrator] 结束 id=${requirementId.slice(0, 8)}… events=${eventCount} ` +
             `耗时=${((Date.now() - startedAt) / 1000).toFixed(1)}s ` +
             `tokens=${stats.inputTokens}/${stats.outputTokens} 成本≈¥${stats.estimatedCost.toFixed(4)}`);
@@ -117,7 +134,16 @@ export async function runOrchestratorForRequirement(requirementId, projectId = g
         log.error(`[orchestrator] 异常 id=${requirementId.slice(0, 8)}…`, message);
     }
     finally {
+        try {
+            const { llmClient } = await getDeps();
+            llmClient.clearObservabilityContext();
+        }
+        catch {
+            // getDeps 失败时忽略
+        }
         runningJobs.delete(requirementId);
+        const rid = requirementId;
+        setImmediate(() => cleanupRequirement(rid));
     }
 }
 function logOrchestratorEvent(requirementId, event) {
@@ -149,10 +175,21 @@ function logOrchestratorEvent(requirementId, event) {
     }
 }
 function serializeEvent(event, requirementId) {
-    return JSON.parse(JSON.stringify(event, (_key, value) => {
-        if (value instanceof Date)
-            return value.toISOString();
-        return value;
-    }));
+    try {
+        return JSON.parse(JSON.stringify(event, (_key, value) => {
+            if (value instanceof Date)
+                return value.toISOString();
+            return value;
+        }));
+    }
+    catch {
+        // 回退方案：手动序列化，避免循环引用崩溃
+        log.warn(`[serializeEvent] JSON序列化失败 requirement=${requirementId.slice(0, 8)}，使用降级策略`);
+        return {
+            type: event.type ?? 'unknown',
+            requirementId,
+            _serializeError: true,
+        };
+    }
 }
 //# sourceMappingURL=orchestrator-runner.js.map

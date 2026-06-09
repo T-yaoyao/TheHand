@@ -1,9 +1,5 @@
-/** 豆包标准推理定价（元/百万 tokens，输入 <=32k 分段） */
-const PRICING_CNY_PER_MILLION = {
-    input: 0.6,
-    output: 3.6,
-};
-const TOKENS_PER_MILLION = 1_000_000;
+import { randomUUID } from 'node:crypto';
+import { estimateLlmCostCny } from './llm-cost.js';
 /**
  * 将 assistant message 里 tool 的 arguments 规范为对象。
  * 兼容：API 已解析为 object / 仍为 JSON 字符串 / 带 ```json 围栏 / 豆包偶发空串。
@@ -48,15 +44,26 @@ export function normalizeAssistantToolArguments(raw) {
 export class LLMClient {
     config;
     tokenHistory = [];
+    hooks;
+    observabilityContext = {};
     constructor(config) {
+        const { hooks, ...rest } = config ?? {};
+        this.hooks = hooks ?? {};
         this.config = {
             endpoint: process.env.DOUBAO_ENDPOINT ?? '',
             apiKey: process.env.DOUBAO_API_KEY ?? '',
             model: process.env.DOUBAO_MODEL ?? '',
             maxTokens: 4096,
             temperature: 0.1,
-            ...config,
+            ...rest,
         };
+    }
+    /** 由编排入口在每轮需求处理开始时注入，关联 LLM 调用与 requirementId */
+    setObservabilityContext(ctx) {
+        this.observabilityContext = { ...ctx };
+    }
+    clearObservabilityContext() {
+        this.observabilityContext = {};
     }
     /**
      * 调用 LLM API（OpenAI 兼容格式）
@@ -123,16 +130,31 @@ export class LLMClient {
             inputTokens: data.usage?.prompt_tokens ?? 0,
             outputTokens: data.usage?.completion_tokens ?? 0,
         };
-        // Token 追踪（限制历史长度避免内存泄漏，上限 200 条足够单次 run 分析）
-        this.tokenHistory.push({
+        const finishReason = choice.finish_reason ?? 'stop';
+        const costCny = estimateLlmCostCny(usage.inputTokens, usage.outputTokens);
+        const requirementId = options?.requirementId?.trim() || this.observabilityContext.requirementId?.trim() || null;
+        const record = {
+            id: randomUUID(),
             agent: options?.agent ?? 'unknown',
+            model: this.config.model || '(unset)',
+            requirementId,
             inputTokens: usage.inputTokens,
             outputTokens: usage.outputTokens,
             latencyMs,
+            costCny,
+            finishReason,
             timestamp: new Date(),
-        });
+        };
+        // Token 追踪（限制历史长度避免内存泄漏，上限 200 条足够单次 run 分析）
+        this.tokenHistory.push(record);
         if (this.tokenHistory.length > 200) {
             this.tokenHistory = this.tokenHistory.slice(-100);
+        }
+        try {
+            this.hooks.onUsage?.(record);
+        }
+        catch (hookErr) {
+            console.warn('[llm] onUsage hook 失败:', hookErr);
         }
         // 解析 tool_calls：合并多路径、规范化 arguments（object / JSON 字符串 / 围栏）
         const toolCalls = this.extractToolCallsFromChoice(data, choice);
@@ -140,7 +162,7 @@ export class LLMClient {
             content: choice.message?.content ?? '',
             toolCalls,
             usage,
-            finishReason: choice.finish_reason ?? 'stop',
+            finishReason,
         };
     }
     /**
@@ -230,8 +252,7 @@ export class LLMClient {
         return {
             ...total,
             avgLatency: total.calls > 0 ? Math.round(total.totalLatency / total.calls) : 0,
-            estimatedCost: (total.inputTokens / TOKENS_PER_MILLION) * PRICING_CNY_PER_MILLION.input +
-                (total.outputTokens / TOKENS_PER_MILLION) * PRICING_CNY_PER_MILLION.output,
+            estimatedCost: estimateLlmCostCny(total.inputTokens, total.outputTokens),
         };
     }
     /**

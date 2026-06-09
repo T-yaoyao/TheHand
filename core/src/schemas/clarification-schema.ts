@@ -17,6 +17,7 @@ export const StructuredRequirementSchema = z.object({
 export const ClarificationOutputSchema = z.object({
   needsMoreInfo: z.boolean(),
   questions: z.array(z.string()).optional(),
+  detectedAmbiguities: z.array(z.string()).optional(),
   requirement: StructuredRequirementSchema.optional(),
   round: z.number().int().min(1).max(3),
 })

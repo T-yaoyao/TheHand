@@ -20,6 +20,7 @@ import { DbRequirementMemory, loadRequirementFromDb } from './db-requirement-mem
 import { execute, queryOne } from './db.js'
 import { pushEvent, cleanupRequirement } from './routes/events.js'
 import { log } from './logger.js'
+import { appendLlmUsageRecord } from './llm-observability-log.js'
 
 const repoRoot = resolve(process.cwd(), '..')
 
@@ -37,7 +38,17 @@ let depsPromise: Promise<{
 async function getDeps() {
   if (!depsPromise) {
     depsPromise = (async () => {
-      const llmClient = new LLMClient()
+      const llmClient = new LLMClient({
+        hooks: {
+          onUsage: (record) => {
+            try {
+              appendLlmUsageRecord(record)
+            } catch (e) {
+              log.warn('[llm-observability] 写入失败:', e instanceof Error ? e.message : e)
+            }
+          },
+        },
+      })
       const promptManager = new PromptManager(resolve(repoRoot, 'prompts'))
       const projectMemory = new ProjectMemory(resolveProjectsDir())
       const requirementMemory = new DbRequirementMemory() as unknown as RequirementMemory
@@ -117,19 +128,23 @@ export async function runOrchestratorForRequirement(
   log.info(`[orchestrator] 开始 id=${requirementId.slice(0, 8)}… project=${projectId}`)
   log.info(`[orchestrator] PM: ${requirement.pmInput.slice(0, 80)}${requirement.pmInput.length > 80 ? '…' : ''}`)
 
-  pushEvent(requirementId, {
-    type: 'orchestrator-started',
-    requirementId,
-    projectId,
-  })
-
   // 状态由 orchestrator.run() yield 的 status-change 同步；勿在此推送 clarifying，
   // 否则与编排器首轮「澄清中」重复，且 plan-ready 续跑时会误发 clarifying。
 
   let eventCount = 0
 
   try {
+    // 先完成冷启动（Skill 发现、Docker 等），再发 started，避免前端长时间停在「已启动但无后续事件」
     const { orchestrator, llmClient } = await getDeps()
+    llmClient.setObservabilityContext({ requirementId })
+
+    pushEvent(requirementId, {
+      type: 'orchestrator-started',
+      requirementId,
+      projectId,
+      phase: '编排引擎就绪，正在连接沙箱与加载项目上下文…',
+      progress: 2,
+    })
 
     for await (const event of orchestrator.run(requirement, projectId)) {
       eventCount++
@@ -166,9 +181,15 @@ export async function runOrchestratorForRequirement(
     })
     log.error(`[orchestrator] 异常 id=${requirementId.slice(0, 8)}…`, message)
   } finally {
+    try {
+      const { llmClient } = await getDeps()
+      llmClient.clearObservabilityContext()
+    } catch {
+      // getDeps 失败时忽略
+    }
     runningJobs.delete(requirementId)
-    // 终态后清理 SSE 连接释放内存
-    cleanupRequirement(requirementId)
+    const rid = requirementId
+    setImmediate(() => cleanupRequirement(rid))
   }
 }
 

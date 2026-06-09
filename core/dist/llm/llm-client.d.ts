@@ -20,6 +20,8 @@ export interface ToolDefinition {
 export interface LLMChatOptions {
     tools?: ToolDefinition[];
     agent?: string;
+    /** 单次调用级覆盖（默认使用 setObservabilityContext 注入的 requirementId） */
+    requirementId?: string;
     maxTokens?: number;
     /**
      * 强制模型以 function 形式调用指定工具（OpenAI 兼容 `tool_choice`）。
@@ -41,13 +43,28 @@ export interface ToolCall {
     name: string;
     arguments: any;
 }
-export interface TokenRecord {
+/** 单次 LLM 调用可观测记录（内存历史 + 可选落盘） */
+export interface LlmUsageRecord {
+    id: string;
     agent: string;
+    model: string;
+    requirementId: string | null;
     inputTokens: number;
     outputTokens: number;
     latencyMs: number;
+    costCny: number;
+    finishReason: string;
     timestamp: Date;
 }
+/** @deprecated 使用 LlmUsageRecord */
+export type TokenRecord = LlmUsageRecord;
+export interface LLMClientHooks {
+    /** 每次成功完成 chat 后回调（用于 JSONL 落盘 / 外部监控） */
+    onUsage?: (record: LlmUsageRecord) => void;
+}
+export type LLMClientOptions = Partial<LLMConfig> & {
+    hooks?: LLMClientHooks;
+};
 /**
  * 将 assistant message 里 tool 的 arguments 规范为对象。
  * 兼容：API 已解析为 object / 仍为 JSON 字符串 / 带 ```json 围栏 / 豆包偶发空串。
@@ -60,7 +77,14 @@ export declare function normalizeAssistantToolArguments(raw: unknown): Record<st
 export declare class LLMClient {
     private config;
     private tokenHistory;
-    constructor(config?: Partial<LLMConfig>);
+    private hooks;
+    private observabilityContext;
+    constructor(config?: LLMClientOptions);
+    /** 由编排入口在每轮需求处理开始时注入，关联 LLM 调用与 requirementId */
+    setObservabilityContext(ctx: {
+        requirementId?: string;
+    }): void;
+    clearObservabilityContext(): void;
     /**
      * 调用 LLM API（OpenAI 兼容格式）
      */
@@ -98,6 +122,6 @@ export declare class LLMClient {
     /**
      * 获取 Token 历史记录
      */
-    getHistory(): TokenRecord[];
+    getHistory(): LlmUsageRecord[];
 }
 //# sourceMappingURL=llm-client.d.ts.map

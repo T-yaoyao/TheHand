@@ -182,8 +182,14 @@ export class CodingPhase extends BasePhaseHandler {
         // 重试精简上下文
         let sandboxFileListHint = '';
         if (opts.codeAttempt > 1 && opts.failedFiles.size > 0) {
-            const passedFiles = planFiles.filter(f => !opts.failedFiles.has(f.path));
-            planFiles = planFiles.filter(f => opts.failedFiles.has(f.path));
+            const normPath = (p) => p.replace(/\\/g, '/');
+            const failedNorm = new Set([...opts.failedFiles].map(p => normPath(p)));
+            const keepInRetry = (path) => {
+                const k = normPath(path);
+                return failedNorm.has(k) || opts.staticGuardInjectPaths.has(k);
+            };
+            const passedFiles = planFiles.filter(f => !keepInRetry(f.path));
+            planFiles = planFiles.filter(f => keepInRetry(f.path));
             if (planFiles.length === 0) {
                 planFiles = opts.mergePlanWithInjections(requirement.plan ?? []);
             }

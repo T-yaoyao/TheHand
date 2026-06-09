@@ -1198,6 +1198,13 @@
   position: relative;
 }
 
+.modal-hint {
+  margin: -12px 0 20px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted, #888);
+}
+
 .modal-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1660,4 +1667,157 @@
   inset: 0;
   z-index: 99;
   background: rgba(10, 14, 26, 0.7);
+}
+
+/* === LLM 可观测性（fixing 分支移植）=== */
+.obs-panel {
+  padding: 24px 28px 40px;
+  max-width: 1200px;
+  margin: 0 auto;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.obs-hint {
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0 0 8px;
+}
+
+.obs-error {
+  margin-bottom: 16px;
+}
+
+.obs-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+.obs-stat-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.obs-stat-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.obs-stat-value {
+  font-size: 1.1rem;
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+.obs-section {
+  margin-bottom: 32px;
+}
+
+.obs-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.obs-table-scroll {
+  max-height: 420px;
+  overflow: auto;
+}
+
+.obs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.obs-table th,
+.obs-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.obs-table th {
+  background: var(--bg-elevated);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.obs-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.obs-table-compact {
+  font-size: 12px;
+}
+
+.obs-table-compact th,
+.obs-table-compact td {
+  padding: 8px 10px;
+}
+
+.obs-cell-time {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.obs-cell-mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.obs-panel-tab {
+  padding: 0;
+  max-width: none;
+  margin: 0;
+  height: auto;
+  min-height: 120px;
+}
+
+.obs-header-tab {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.obs-title-tab {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.obs-hint-tab {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0 0 14px;
+}
+
+.obs-stats-tab {
+  margin-bottom: 18px;
+}
+
+.obs-subheading {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 10px;
+  color: var(--text);
 }

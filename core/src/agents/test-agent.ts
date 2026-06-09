@@ -62,7 +62,7 @@ export function createTestAgent(): AgentDefinition {
  *
  * 优化点（v2）：
  * - 注入沙箱环境先验知识，避免用 find/head 等命令试错
- * - maxRounds 从 30 降到 15，减少无效循环
+ * - maxRounds 设为 3，减少无效循环与 token 消耗
  * - 明确测试命令模板，避免路径试错
  * - 限制工具调用次数提示，鼓励高效执行
  */
@@ -89,7 +89,7 @@ export function createBoundaryTestAgent(sandboxInfo?: {
 - 查找文件请用 file-read 直接读取已知路径，不要用 shell find 搜索
 - 修改的文件：${changedFilesList}
 
-## 工作流程（请严格按顺序，控制在 8 轮内完成）
+## 工作流程（请严格按顺序，控制在 3 轮内完成）
 
 1. 用 file-read 逐个读取本次修改的文件（不要搜索文件，路径已在上方列出）
 2. 分析每个函数的输入类型、边界条件、错误路径
@@ -111,7 +111,7 @@ export function createBoundaryTestAgent(sandboxInfo?: {
 
 通过 submit_test_result 提交结果。如果生成了测试文件并全部通过，passed 为 true。`,
     tools: ['shell', 'file-read', 'file-write'],
-    maxRounds: 15,
+    maxRounds: 3,
     outputTool: TEST_OUTPUT_TOOL,
   }
 }

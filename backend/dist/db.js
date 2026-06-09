@@ -111,6 +111,14 @@ export async function initDB() {
         db.run(`ALTER TABLE requirements ADD COLUMN auto_approve INTEGER DEFAULT 0`);
     }
     catch { }
+    try {
+        db.run(`ALTER TABLE requirements ADD COLUMN pr_url TEXT`);
+    }
+    catch { }
+    try {
+        db.run(`ALTER TABLE requirements ADD COLUMN pr_skipped INTEGER DEFAULT 0`);
+    }
+    catch { }
     saveDB();
     return db;
 }

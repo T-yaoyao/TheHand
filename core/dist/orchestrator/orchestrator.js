@@ -20,6 +20,7 @@ import { enrichPlanWithIntegrationEntryFiles } from '../utils/plan-integration-e
 import { sanitizePhantomRouteTablesAgainstEntryTopology } from '../utils/routing-entry-topology.js';
 import { inferRouteEntryContextFromRequirementAndPlan } from '../utils/plan-route-context-infer.js';
 import { extractAndReadErrorFiles } from '../utils/error-file-extractor.js';
+import { transition } from './state-machine.js';
 import { Logger } from '../utils/logger.js';
 import { TokenBudgetManager } from '../utils/token-budget.js';
 /**
@@ -88,7 +89,8 @@ export class Orchestrator {
             }
             catch { }
         }
-        // 加载项目上下文
+        // 加载项目上下文（可能读盘/DB，首包前给前端一条进度避免「空窗」）
+        yield { type: 'executing', phase: 'loading project context…', progress: 6 };
         const projectContext = await projectMemory.load(projectId);
         try {
             // ── 状态检测：根据当前阶段跳转到对应入口 ──
@@ -97,7 +99,7 @@ export class Orchestrator {
                 yield* this.phaseCommit(requirement, requirementMemory, repoManager, sandboxManager, sandbox);
                 return;
             }
-            if (requirement.status === 'plan-ready' && requirement.plan) {
+            if ((requirement.status === 'plan-ready' || requirement.status === 'plan-approved') && requirement.plan) {
                 // 跳转到编码阶段（用户已确认方案）
                 yield* this.phaseCoding(requirement, projectId, requirementMemory, skillRegistry, llmClient, promptManager, projectContext, testRunner, repoManager, sandboxManager, sandbox, executor);
                 return;
@@ -395,6 +397,8 @@ export class Orchestrator {
      * 编码+测试阶段（支持从 plan-approved 状态直接进入）
      */
     async *phaseCoding(requirement, projectId, requirementMemory, skillRegistry, llmClient, promptManager, projectContext, testRunner, repoManager, sandboxManager, sandbox, executor) {
+        transition(requirement, 'coding', '开始编码阶段');
+        await requirementMemory.saveRequirement(requirement);
         yield { type: 'status-change', status: 'coding', agent: 'coding' };
         const skill = requirement.structuredRequirement
             ? skillRegistry.match(requirement.structuredRequirement)
@@ -448,9 +452,16 @@ export class Orchestrator {
                 // ── 重试时精简上下文：只重传失败文件，注入沙箱文件列表 ──
                 let sandboxFileListHint = '';
                 if (codeAttempt > 1 && failedFiles.size > 0) {
-                    // 只重传失败的文件，已通过的文件从 plan 中移除
-                    const passedFiles = planFiles.filter(f => !failedFiles.has(f.path));
-                    planFiles = planFiles.filter(f => failedFiles.has(f.path));
+                    const normPath = (p) => p.replace(/\\/g, '/');
+                    const failedNorm = new Set([...failedFiles].map(p => normPath(p)));
+                    /** 重试须保留：上轮静态 guard 标记失败的文件 + 编排器注入的路由/集成文件（outlet-nav、import guard 等） */
+                    const keepInRetry = (path) => {
+                        const k = normPath(path);
+                        return failedNorm.has(k) || staticGuardInjectPaths.has(k);
+                    };
+                    // 只重传失败与须修正的注入文件；已通过的文件从 plan 中移除
+                    const passedFiles = planFiles.filter(f => !keepInRetry(f.path));
+                    planFiles = planFiles.filter(f => keepInRetry(f.path));
                     if (planFiles.length === 0) {
                         // 所有文件都通过了校验，但测试失败了 → 重传全部
                         planFiles = mergePlanWithInjections(requirement.plan ?? []);

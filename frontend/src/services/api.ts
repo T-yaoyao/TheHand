@@ -10,6 +10,8 @@ export interface Requirement {
   risk_level?: 'low' | 'medium' | 'high'
   natural_language_summary?: NaturalLanguageSummary | null
   trace_id?: string
+  pr_url?: string | null
+  pr_skipped?: number | null
   created_at: string
   updated_at: string
 }
@@ -73,6 +75,41 @@ export interface MetricsSummary {
     successRate: number
     averageLatencyMs: number
   }>
+}
+
+export interface LlmUsageSummary {
+  calls: number
+  inputTokens: number
+  outputTokens: number
+  totalCostCny: number
+  avgLatencyMs: number
+  byAgent: Record<string, {
+    calls: number
+    inputTokens: number
+    outputTokens: number
+    costCny: number
+    avgLatencyMs: number
+  }>
+}
+
+export interface LlmUsageRow {
+  id: string
+  agent: string
+  model: string
+  requirementId: string | null
+  inputTokens: number
+  outputTokens: number
+  latencyMs: number
+  costCny: number
+  finishReason: string
+  timestamp: string
+}
+
+export interface LlmUsageResponse {
+  summary: LlmUsageSummary
+  recent: LlmUsageRow[]
+  logPath: string
+  filterRequirementId?: string | null
 }
 
 async function handleResponse<T>(res: Response): Promise<T> {
@@ -180,6 +217,18 @@ export const api = {
     return handleResponse(res)
   },
 
+  async submitPrChoice(
+    requirementId: string,
+    create: boolean,
+  ): Promise<{ ok: boolean; skipped?: boolean; prUrl?: string }> {
+    const res = await fetch(`${BASE}/requirements/${requirementId}/submit-pr`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ create }),
+    })
+    return handleResponse(res)
+  },
+
   async rollbackChanges(requirementId: string): Promise<{ ok: boolean }> {
     const res = await fetch(`${BASE}/requirements/${requirementId}/rollback`, { method: 'POST' })
     return handleResponse(res)
@@ -187,6 +236,13 @@ export const api = {
 
   async getMetrics(): Promise<MetricsSummary> {
     const res = await fetch(`${BASE}/orchestrator/metrics`)
+    return handleResponse(res)
+  },
+
+  async getLlmUsage(requirementId?: string): Promise<LlmUsageResponse> {
+    const trimmed = requirementId?.trim()
+    const q = trimmed ? `?requirementId=${encodeURIComponent(trimmed)}` : ''
+    const res = await fetch(`${BASE}/orchestrator/llm-usage${q}`)
     return handleResponse(res)
   },
 }

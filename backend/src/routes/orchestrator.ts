@@ -5,6 +5,7 @@ import { getDefaultProjectId } from '@thehand/core'
 import { isOrchestratorRunning, runOrchestratorForRequirement } from '../orchestrator-runner.js'
 import { getActiveConnectionCount } from './events.js'
 import { log } from '../logger.js'
+import { readLlmUsageFromDisk, summarizeLlmUsageRows } from '../llm-observability-log.js'
 
 export const orchestratorRouter = Router()
 
@@ -43,6 +44,32 @@ orchestratorRouter.get('/status', (_req: Request, res: Response) => {
     activeSseConnections: getActiveConnectionCount(),
     message: 'Orchestrator 就绪',
   })
+})
+
+/**
+ * GET /api/orchestrator/llm-usage — 每次 LLM 调用的 tokens / 延迟 / 成本（JSONL 持久化）
+ * 查询参数 requirementId：仅返回该需求的调用（用于任务详情 Tab）
+ */
+orchestratorRouter.get('/llm-usage', (req: Request, res: Response) => {
+  try {
+    const q = req.query.requirementId
+    const requirementId = typeof q === 'string' && q.trim() ? q.trim() : ''
+    const { rows, path } = readLlmUsageFromDisk()
+    const filtered = requirementId
+      ? rows.filter((r) => r.requirementId === requirementId)
+      : rows
+    const summary = summarizeLlmUsageRows(filtered)
+    const recent = [...filtered].reverse().slice(0, 200)
+    res.json({
+      summary,
+      recent,
+      logPath: path,
+      filterRequirementId: requirementId || null,
+    })
+  } catch (e) {
+    log.error('[llm-usage] 读取失败:', e)
+    res.status(500).json({ error: '读取 LLM 可观测性数据失败' })
+  }
 })
 
 /**

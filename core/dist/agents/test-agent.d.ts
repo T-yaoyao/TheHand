@@ -16,7 +16,7 @@ export declare function createTestAgent(): AgentDefinition;
  *
  * 优化点（v2）：
  * - 注入沙箱环境先验知识，避免用 find/head 等命令试错
- * - maxRounds 从 30 降到 15，减少无效循环
+ * - maxRounds 设为 3，减少无效循环与 token 消耗
  * - 明确测试命令模板，避免路径试错
  * - 限制工具调用次数提示，鼓励高效执行
  */

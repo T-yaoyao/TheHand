@@ -1,6 +1,6 @@
 import type { OrchestratorEvent, PhaseContext } from '../../types.js'
 import { BasePhaseHandler } from '../phase-handler.js'
-import { runClarification } from '../../agents/clarification-agent.js'
+import { runClarification, expandClarificationQuestions } from '../../agents/clarification-agent.js'
 import { validateRequirement, validationErrorsToQuestions } from '../../utils/requirement-validator.js'
 import { transition } from '../state-machine.js'
 import { Logger } from '../../utils/logger.js'
@@ -95,11 +95,20 @@ export class ClarificationPhase extends BasePhaseHandler {
 
   private async *handleNeedsMoreInfo(
     ctx: PhaseContext,
-    result: { requirement: any; needsMoreInfo: boolean; questions: string[] | null; round: number },
+    result: {
+      requirement: any
+      needsMoreInfo: boolean
+      questions: string[] | null
+      detectedAmbiguities?: string[] | null
+      round: number
+    },
     currentRound: number,
   ): AsyncGenerator<OrchestratorEvent> {
     const { requirement, requirementMemory } = ctx
-    const questions = result.questions ?? []
+    const questions = expandClarificationQuestions(
+      result.questions ?? [],
+      result.detectedAmbiguities,
+    )
 
     for (const q of questions) {
       await requirementMemory.addConversation({

@@ -6,7 +6,21 @@ export interface ClarificationResult {
   requirement: StructuredRequirement
   needsMoreInfo: boolean
   questions: string[] | null
+  /** 模型显式列出的歧义/缺口（追问前展示，便于 PM 理解「为何要问」） */
+  detectedAmbiguities?: string[] | null
   round: number
+}
+
+/** 将歧义摘要与追问合并为对话气泡（首条为歧义，其后为具体问题） */
+export function expandClarificationQuestions(
+  questions: string[],
+  ambiguities?: string[] | null,
+): string[] {
+  if (!ambiguities?.length) return questions
+  const head =
+    '**识别到的歧义 / 信息缺口：**\n' +
+    ambiguities.map(a => `- ${String(a).trim()}`).join('\n')
+  return [head, ...questions]
 }
 
 /**
@@ -60,10 +74,17 @@ export const CLARIFICATION_TOOLS: ToolDefinition[] = [
     type: 'function' as const,
     function: {
       name: 'ask_for_clarification',
-      description: '当需求信息不完整时，向 PM 追问。每轮最多 2-3 个问题。',
+      description:
+        '当需求信息不完整或存在歧义时调用。先用简短条目列出你识别到的歧义/缺口，再给出 2-3 个具体问题；禁止无追问地硬猜业务规则。',
       parameters: {
         type: 'object',
         properties: {
+          detected_ambiguities: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              '从 PM 原文中抽象出的不确定点（如：未指明实体、范围前后端、字段类型、与现有模型的冲突等），每条一句话',
+          },
           questions: {
             type: 'array',
             items: { type: 'string' },
@@ -176,6 +197,7 @@ export async function runClarification(
           requirement: req,
           needsMoreInfo: false,
           questions: null,
+          detectedAmbiguities: null,
           round,
         }
       }
@@ -185,10 +207,15 @@ export async function runClarification(
 
     if (tc.name === 'ask_for_clarification' && tc.arguments?.questions) {
       console.log('[clarification] 使用 function calling: ask_for_clarification')
+      const rawAmb = (tc.arguments as { detected_ambiguities?: unknown }).detected_ambiguities
+      const detectedAmbiguities = Array.isArray(rawAmb)
+        ? rawAmb.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+        : null
       return {
         requirement: currentRequirement ?? currentOrDefault(pmInput),
         needsMoreInfo: true,
         questions: tc.arguments.questions as string[],
+        detectedAmbiguities: detectedAmbiguities?.length ? detectedAmbiguities : null,
         round,
       }
     }
@@ -240,6 +267,7 @@ function parseClarificationResponse(response: string, round: number, currentRequ
       requirement: json as StructuredRequirement,
       needsMoreInfo: false,
       questions: null,
+      detectedAmbiguities: null,
       round,
     }
   }
@@ -253,6 +281,7 @@ function parseClarificationResponse(response: string, round: number, currentRequ
       },
       needsMoreInfo: false,
       questions: null,
+      detectedAmbiguities: null,
       round,
     }
   }
@@ -262,6 +291,7 @@ function parseClarificationResponse(response: string, round: number, currentRequ
     requirement: currentRequirement ?? currentOrDefault(response),
     needsMoreInfo: true,
     questions: extractQuestions(response),
+    detectedAmbiguities: null,
     round,
   }
 }

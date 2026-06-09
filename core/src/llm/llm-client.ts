@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto'
+import { estimateLlmCostCny } from './llm-cost.js'
+
 export interface LLMConfig {
   endpoint: string
   apiKey: string
@@ -23,6 +26,8 @@ export interface ToolDefinition {
 export interface LLMChatOptions {
   tools?: ToolDefinition[]
   agent?: string
+  /** 单次调用级覆盖（默认使用 setObservabilityContext 注入的 requirementId） */
+  requirementId?: string
   maxTokens?: number
   /**
    * 强制模型以 function 形式调用指定工具（OpenAI 兼容 `tool_choice`）。
@@ -47,21 +52,31 @@ export interface ToolCall {
   arguments: any
 }
 
-export interface TokenRecord {
+/** 单次 LLM 调用可观测记录（内存历史 + 可选落盘） */
+export interface LlmUsageRecord {
+  id: string
   agent: string
+  model: string
+  requirementId: string | null
   inputTokens: number
   outputTokens: number
   latencyMs: number
+  costCny: number
+  finishReason: string
   timestamp: Date
 }
 
-/** 豆包标准推理定价（元/百万 tokens，输入 <=32k 分段） */
-const PRICING_CNY_PER_MILLION = {
-  input: 0.6,
-  output: 3.6,
-} as const
+/** @deprecated 使用 LlmUsageRecord */
+export type TokenRecord = LlmUsageRecord
 
-const TOKENS_PER_MILLION = 1_000_000
+export interface LLMClientHooks {
+  /** 每次成功完成 chat 后回调（用于 JSONL 落盘 / 外部监控） */
+  onUsage?: (record: LlmUsageRecord) => void
+}
+
+export type LLMClientOptions = Partial<LLMConfig> & {
+  hooks?: LLMClientHooks
+}
 
 /**
  * 将 assistant message 里 tool 的 arguments 规范为对象。
@@ -101,17 +116,30 @@ export function normalizeAssistantToolArguments(raw: unknown): Record<string, un
  */
 export class LLMClient {
   private config: LLMConfig
-  private tokenHistory: TokenRecord[] = []
+  private tokenHistory: LlmUsageRecord[] = []
+  private hooks: LLMClientHooks
+  private observabilityContext: { requirementId?: string } = {}
 
-  constructor(config?: Partial<LLMConfig>) {
+  constructor(config?: LLMClientOptions) {
+    const { hooks, ...rest } = config ?? {}
+    this.hooks = hooks ?? {}
     this.config = {
       endpoint: process.env.DOUBAO_ENDPOINT ?? '',
       apiKey: process.env.DOUBAO_API_KEY ?? '',
       model: process.env.DOUBAO_MODEL ?? '',
       maxTokens: 4096,
       temperature: 0.1,
-      ...config,
+      ...rest,
     }
+  }
+
+  /** 由编排入口在每轮需求处理开始时注入，关联 LLM 调用与 requirementId */
+  setObservabilityContext(ctx: { requirementId?: string }): void {
+    this.observabilityContext = { ...ctx }
+  }
+
+  clearObservabilityContext(): void {
+    this.observabilityContext = {}
   }
 
   /**
@@ -192,16 +220,33 @@ export class LLMClient {
       outputTokens: data.usage?.completion_tokens ?? 0,
     }
 
-    // Token 追踪（限制历史长度避免内存泄漏，上限 200 条足够单次 run 分析）
-    this.tokenHistory.push({
+    const finishReason = choice.finish_reason ?? 'stop'
+    const costCny = estimateLlmCostCny(usage.inputTokens, usage.outputTokens)
+    const requirementId =
+      options?.requirementId?.trim() || this.observabilityContext.requirementId?.trim() || null
+
+    const record: LlmUsageRecord = {
+      id: randomUUID(),
       agent: options?.agent ?? 'unknown',
+      model: this.config.model || '(unset)',
+      requirementId,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       latencyMs,
+      costCny,
+      finishReason,
       timestamp: new Date(),
-    })
+    }
+
+    // Token 追踪（限制历史长度避免内存泄漏，上限 200 条足够单次 run 分析）
+    this.tokenHistory.push(record)
     if (this.tokenHistory.length > 200) {
       this.tokenHistory = this.tokenHistory.slice(-100)
+    }
+    try {
+      this.hooks.onUsage?.(record)
+    } catch (hookErr) {
+      console.warn('[llm] onUsage hook 失败:', hookErr)
     }
 
     // 解析 tool_calls：合并多路径、规范化 arguments（object / JSON 字符串 / 围栏）
@@ -211,7 +256,7 @@ export class LLMClient {
       content: choice.message?.content ?? '',
       toolCalls,
       usage,
-      finishReason: choice.finish_reason ?? 'stop',
+      finishReason,
     }
   }
 
@@ -302,7 +347,7 @@ export class LLMClient {
     this.tokenHistory = []
   }
 
-  private aggregateStats(records: TokenRecord[]) {
+  private aggregateStats(records: LlmUsageRecord[]) {
     const total = records.reduce(
       (acc, r) => ({
         inputTokens: acc.inputTokens + r.inputTokens,
@@ -315,17 +360,14 @@ export class LLMClient {
     return {
       ...total,
       avgLatency: total.calls > 0 ? Math.round(total.totalLatency / total.calls) : 0,
-      estimatedCost:
-        (total.inputTokens / TOKENS_PER_MILLION) * PRICING_CNY_PER_MILLION.input +
-        (total.outputTokens / TOKENS_PER_MILLION) * PRICING_CNY_PER_MILLION.output,
+      estimatedCost: estimateLlmCostCny(total.inputTokens, total.outputTokens),
     }
   }
 
   /**
    * 获取 Token 历史记录
    */
-  getHistory(): TokenRecord[] {
+  getHistory(): LlmUsageRecord[] {
     return [...this.tokenHistory]
   }
 }
-

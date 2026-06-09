@@ -77,7 +77,25 @@ function deriveStatus(
 
   if (latest.type === 'failed') return 'failed'
   if (latest.type === 'completed') return 'done'
+
+  // DB 已到终态，但最新 SSE 可能仍为 executing（cleanup 断开连接或未收到 completed）
+  if (fallback === 'done' || fallback === 'failed' || fallback === 'reverted') {
+    return fallback
+  }
+
   if (latest.type === 'status-change' && latest.status) return latest.status
+
+  // 确认方案后 HTTP 立即返回；SSE 在 getDeps 完成前可能长时间只有本事件 —— 勿把步骤条卡在「方案」
+  if (latest.type === 'orchestrator-started') {
+    if (fallback === 'plan-ready' || fallback === 'plan-approved') {
+      return 'coding'
+    }
+  }
+
+  // 确认方案后本地会乐观更新为 plan-approved；在首条 status-change:coding 到达前，用 executing 填充步骤条
+  if (latest.type === 'executing' && latest.phase && fallback === 'plan-approved') {
+    return 'coding'
+  }
 
   if (latest.requirement?.status) return latest.requirement.status
 
@@ -117,8 +135,11 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
   const isDone = current === 'done'
   const isFailed = latestEvent?.type === 'failed' || current === 'failed'
   const activeIdx = isFailed ? lastActiveStepFromEvents(events) : stepIndex(current)
-  const progress = latestEvent?.progress ?? 0
-  const phase = latestEvent?.phase ?? ''
+  const progress = isDone ? 100 : (latestEvent?.progress ?? 0)
+  const phase =
+    isDone || current === 'failed' || current === 'reverted'
+      ? ''
+      : (latestEvent?.phase ?? '')
 
   const pipelineRef = useRef<HTMLDivElement>(null)
   const prevActiveRef = useRef(activeIdx)
@@ -236,7 +257,7 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
         </div>
       )}
 
-      {latestEvent?.type === 'diff-ready' && (
+      {latestEvent?.type === 'diff-ready' && requirementStatus !== 'done' && requirementStatus !== 'failed' && (
         <div className="alert alert-info">
           <strong>代码变更就绪</strong> — 请前往「变更预览」Tab 确认提交
         </div>
@@ -261,7 +282,7 @@ export function StatusFlow({ events, latestEvent, connected, requirementStatus, 
         </div>
       )}
 
-      {latestEvent?.type === 'completed' && (
+      {(latestEvent?.type === 'completed' || requirementStatus === 'done') && (
         <div className="alert alert-success">
           <strong>需求已完成</strong>
         </div>
