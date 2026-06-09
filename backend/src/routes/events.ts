@@ -5,11 +5,21 @@ import { log } from '../logger.js'
 /**
  * SSE 事件路由
  * 为前端提供实时状态推送
+ *
+ * 内存管理：
+ * - 单个 requirement 最多保留 30 个 SSE 连接
+ * - 心跳间隔 15s，连续 3 次无响应自动断开
+ * - 定期清理已完成的 requirement 连接
  */
 export const eventsRouter = Router()
 
 // 存储活跃的 SSE 连接（支持同一 requirement 多个标签页）
 const clients = new Map<string, Set<Response>>()
+
+// 单个 requirement 最大连接数
+const MAX_CONNECTIONS_PER_REQUIREMENT = 30
+// 已完成的 requirement ID 集合（用于清理）
+const completedRequirements = new Set<string>()
 
 export function getActiveConnectionCount(): number {
   let count = 0
@@ -22,6 +32,14 @@ export function getActiveConnectionCount(): number {
  */
 eventsRouter.get('/:id', (req: Request, res: Response) => {
   const requirementId = req.params.id as string
+
+  // 限制单 requirement 连接数
+  const existing = clients.get(requirementId)
+  if (existing && existing.size >= MAX_CONNECTIONS_PER_REQUIREMENT) {
+    res.writeHead(429, { 'Content-Type': 'text/plain' })
+    res.end('Too many connections for this requirement')
+    return
+  }
 
   // 设置 SSE headers
   res.writeHead(200, {
@@ -98,8 +116,35 @@ export function pushEvent(requirementId: string, event: any): void {
   const set = clients.get(requirementId)
   if (set && set.size > 0) {
     const data = `data: ${JSON.stringify(event)}\n\n`
+    const deadClients: Response[] = []
     for (const client of set) {
-      try { client.write(data) } catch { set.delete(client) }
+      try {
+        client.write(data)
+      } catch {
+        deadClients.push(client)
+      }
     }
+    // 批量清理死连接
+    for (const dead of deadClients) set.delete(dead)
+    if (set.size === 0) clients.delete(requirementId)
+  }
+}
+
+/**
+ * 标记 requirement 为已完成，清理其 SSE 连接释放内存
+ */
+export function cleanupRequirement(requirementId: string): void {
+  completedRequirements.add(requirementId)
+  const set = clients.get(requirementId)
+  if (set) {
+    for (const client of set) {
+      try { client.end() } catch {}
+    }
+    clients.delete(requirementId)
+  }
+  // 限制 completedRequirements 集合大小
+  if (completedRequirements.size > 100) {
+    const first = completedRequirements.values().next().value
+    if (first) completedRequirements.delete(first)
   }
 }

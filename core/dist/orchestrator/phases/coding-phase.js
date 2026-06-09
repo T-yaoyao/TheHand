@@ -1,621 +1,566 @@
-/**
- * 编码+测试阶段
- * Architect 分析 → 分批编码 → 文件校验 → 测试 → Diff 生成
- *
- * 支持三种输出模式：
- * 1. 全量重写（默认）- AI 输出完整文件
- * 2. __APPEND__ 追加 - CSS 等大文件只追加新内容
- * 3. __PATCH__ 手术式编辑 - diff-safety 失败后自动切换，AI 只输出要改的行
- */
-import { readFile, writeFile, mkdir, rm, unlink, readdir } from 'fs/promises';
-import { join, dirname } from 'path';
-import { runCodingBatch, extractInterfaceSummary } from '../../agents/coding-agent.js';
+import { BasePhaseHandler } from '../phase-handler.js';
+import { transition } from '../state-machine.js';
+import { Logger } from '../../utils/logger.js';
+import { runCodingBatch, extractInterfaceSummary, extractAvailableDependencies, validateImports } from '../../agents/coding-agent.js';
 import { buildBatches, extractFileInterfaces, runArchitect } from '../../agents/architect-agent.js';
-import { DiffSafetyChecker } from '../../utils/diff-safety-checker.js';
-import { extractAndReadErrorFiles } from '../helpers.js';
-import { createLogger } from '../../utils/logger.js';
-import { MAX_RETRIES, } from '../../config.js';
-const log = createLogger('phase:coding');
-// ── Patch 模式的 FC 工具定义 ──
-const PATCH_TOOLS = [
-    {
-        type: 'function',
-        function: {
-            name: 'submit_patch',
-            description: '提交手术式补丁。只输出需要修改的具体行，系统会在原文件上精确应用。',
-            parameters: {
-                type: 'object',
-                properties: {
-                    file: { type: 'string', description: '文件路径' },
-                    operations: {
-                        type: 'array',
-                        items: {
-                            type: 'object',
-                            properties: {
-                                type: { type: 'string', enum: ['insert_after', 'replace_lines', 'append'], description: '操作类型' },
-                                line: { type: 'number', description: 'insert_after/replace_lines 的目标行号（从1开始）' },
-                                endLine: { type: 'number', description: 'replace_lines 的结束行号' },
-                                content: { type: 'string', description: '要插入/替换的内容' },
-                            },
-                            required: ['type', 'content'],
-                        },
-                    },
-                },
-                required: ['file', 'operations'],
-            },
-        },
-    },
-];
-export class CodingPhase {
+import { detectCodingRegression, formatRegressionRetryHint } from '../../utils/coding-regression-guard.js';
+import { loadSandboxSourceContents, sandboxIndexImportsComponent, skipOrphanImportIntegrationCheck, sourceFileImportsTargetModule } from '../../utils/component-sandbox-import.js';
+import { isRouteTableModulePath, pickApplicationEntryForRouteTable, collectRouteIntegrationContextPaths } from '../../utils/route-wiring-entry.js';
+import { findOutletNavRouteViolations } from '../../utils/outlet-nav-route-guard.js';
+import { findUnresolvedRelativeImportsInFileMap } from '../../utils/relative-import-resolve-guard.js';
+import { join, dirname } from 'path';
+const log = Logger.for('phase:coding');
+/**
+ * 编码阶段处理器
+ *
+ * 职责：
+ * - Architect 分析依赖 + 分批
+ * - 分批 Coding（LLM 生成代码）
+ * - 多层校验（依赖、退化、孤立组件、路由一致性、import 解析）
+ * - 写入沙箱 + Diff 验证
+ * - 最多 3 轮重试
+ */
+export class CodingPhase extends BasePhaseHandler {
     name = 'coding';
-    async *run(ctx) {
-        const { requirement, projectId, requirementMemory, skillRegistry, llmClient, promptManager, projectContext, testRunner, repoManager, sandboxManager, sandbox, executor, } = ctx;
-        yield { type: 'status-change', status: 'coding', agent: 'coding' };
+    MAX_RETRIES = 3;
+    async *execute(ctx) {
+        const { requirement, requirementMemory, llmClient, promptManager, skillRegistry, projectContext, sandbox, agentRunner } = ctx;
+        yield this.statusChange('coding', 'coding');
         const skill = requirement.structuredRequirement
             ? skillRegistry.match(requirement.structuredRequirement)
             : null;
+        let codingRegressionHint = '';
         const codeErrors = [];
-        const commands = projectContext.commands ?? { lint: 'echo lint skipped', test: 'echo test skipped', build: 'echo build skipped' };
-        const pastLessons = await requirementMemory.getLessons(projectId, 'coding', 5);
+        const commands = projectContext.commands?.lint ? projectContext.commands : { lint: 'npm run lint', test: 'npm test', build: 'npm run build' };
+        const pastLessons = await requirementMemory.getLessons(ctx.projectId, 'coding', 5);
         let codeOutputs = [];
         let previousOutputs = [];
         let finalFileValidationSummary = null;
-        for (let codeAttempt = 1; codeAttempt <= MAX_RETRIES; codeAttempt++) {
-            yield { type: 'executing', phase: `coding (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 30 };
+        const failedFiles = new Set();
+        const staticGuardInjectPaths = new Set();
+        const mergePlanWithInjections = (base) => {
+            const norm = (p) => p.replace(/\\/g, '/');
+            const byPath = new Map();
+            for (const f of base) {
+                const key = norm(f.path);
+                byPath.set(key, { ...f, path: key });
+            }
+            const injectDesc = '【TheHand 编排器】须修正上一轮静态校验指出的问题；请对照沙箱磁盘**真实路径**做最小改动。';
+            for (const p of staticGuardInjectPaths) {
+                if (byPath.has(p))
+                    continue;
+                byPath.set(p, { path: p, changeDescription: injectDesc, priority: 999_000 });
+            }
+            return [...byPath.values()].sort((a, b) => a.priority - b.priority);
+        };
+        for (let codeAttempt = 1; codeAttempt <= this.MAX_RETRIES; codeAttempt++) {
+            yield this.progress(`coding (attempt ${codeAttempt}/${this.MAX_RETRIES})`, 30);
             let codingHint = '';
             if (pastLessons.length > 0) {
-                const lessonsText = pastLessons.map(l => `- [${l.phase}/${l.filePath ?? 'general'}] ${l.errorSummary}`).join('\n');
-                codingHint = '\n\n' + await promptManager.loadAndRender('shared/lessons', { lessons: lessonsText });
+                codingHint = '\n\n## 历史失败教训（请避免重复以下错误）\n' +
+                    pastLessons.map(l => `- [${l.phase}/${l.filePath ?? 'general'}] ${l.errorSummary}`).join('\n');
             }
-            // ── 如果上轮因 diff-safety 失败，切换到 patch 模式 ──
-            const lastError = codeErrors[codeErrors.length - 1] ?? '';
-            const usePatchMode = lastError.includes('标签被替换') || lastError.includes('非计划变更');
             codeOutputs = [];
-            let architectOutput = null;
-            const lastTestError = codeErrors.length > 0 ? codeErrors[codeErrors.length - 1] : undefined;
-            let errorHintCombined = [
-                codingHint || '',
-                lastTestError ? `\n\n## 上轮错误反馈\n${lastTestError}` : '',
-                codeAttempt > 1 && previousOutputs.length > 0
-                    ? '\n\n## 上轮生成的代码（仅供参考）\n' + previousOutputs.map(f => `- ${f.path}: ${f.summary}`).join('\n')
-                    : '',
-            ].filter(Boolean).join('');
             if (skill) {
-                yield { type: 'executing', phase: `skill: ${skill.name}`, progress: 35 };
+                yield this.progress(`skill: ${skill.name}`, 35);
                 const skillOutputs = await skill.execute(requirement.structuredRequirement, projectContext);
                 codeOutputs = skillOutputs.map(o => ({ path: o.path, content: o.content, summary: o.summary }));
             }
             else {
-                const planFiles = requirement.plan ?? [];
-                // Architect 分析
-                yield { type: 'executing', phase: `architect analyzing ${planFiles.length} files...`, progress: 32 };
-                try {
-                    if (requirement.structuredRequirement) {
-                        architectOutput = await runArchitect(ctx.agentRunner, promptManager, planFiles, sandbox.path, projectContext, requirement.structuredRequirement);
-                    }
-                }
-                catch (archErr) {
-                    log.warn('LLM 分析异常，降级到正则分批', archErr.message);
-                    yield { type: 'executing', phase: `architect 异常: ${archErr.message?.slice(0, 100) ?? 'unknown'}`, progress: 33, warnings: ['LLM 依赖分析异常，将降级到正则分批'] };
-                }
-                let batches, fileInterfaces;
-                if (architectOutput) {
-                    batches = architectOutput.batches;
-                    fileInterfaces = await extractFileInterfaces(sandbox.path, planFiles, projectContext.ormPatterns?.modelField);
-                    yield { type: 'executing', phase: `architect: ${batches.length} batches, ${architectOutput.crossFileRefs.length} cross-refs`, progress: 34 };
-                }
-                else {
-                    log.info('降级到正则分批');
-                    const fallback = await buildBatches(sandbox.path, planFiles);
-                    batches = fallback.batches;
-                    fileInterfaces = fallback.fileInterfaces;
-                    yield { type: 'executing', phase: `architect 失败，降级到正则分批: ${batches.length} batches`, progress: 34, warnings: ['LLM 依赖分析未生效，使用正则分批'] };
-                }
-                log.info(`${batches.length} batches: ${batches.map((b) => `[${b.files.join(', ')}]`).join(' → ')}`);
-                if (usePatchMode) {
-                    // ── Patch 模式：对每个文件做手术式编辑 ──
-                    log.info('切换到 patch 模式：AI 只输出要改的行');
-                    yield { type: 'executing', phase: 'patch mode: 手术式编辑', progress: 35 };
-                    for (const planFile of planFiles) {
-                        const fullPath = join(sandbox.path, planFile.path);
-                        let originalContent = '';
-                        try {
-                            originalContent = await readFile(fullPath, 'utf-8');
-                        }
-                        catch { }
-                        if (planFile.path.endsWith('.css') || planFile.path.endsWith('.scss')) {
-                            // CSS 继续用 append 模式
-                            const batchOutputs = await this.runCodingBatchSafe(llmClient, promptManager, { files: [planFile.path], reason: 'CSS' }, planFiles, fileInterfaces, new Map(), sandbox.path, projectContext, errorHintCombined || undefined, architectOutput?.files, architectOutput?.crossFileRefs, architectOutput?.globalContext);
-                            codeOutputs.push(...batchOutputs);
-                        }
-                        else {
-                            // 非 CSS 文件：patch 模式
-                            const patchResult = await this.runPatchMode(llmClient, promptManager, planFile, originalContent, sandbox.path, projectContext, errorHintCombined || undefined, architectOutput?.files?.find(f => f.path === planFile.path)?.detailedChange);
-                            if (patchResult) {
-                                codeOutputs.push(patchResult);
-                            }
-                        }
-                    }
-                }
-                else {
-                    // ── 正常模式：全量重写 ──
-                    const generatedSummaries = new Map();
-                    let batchFailed = false;
-                    for (let bi = 0; bi < batches.length; bi++) {
-                        const batch = batches[bi];
-                        yield {
-                            type: 'executing',
-                            phase: `coding batch ${bi + 1}/${batches.length}: ${batch.files.join(', ')}`,
-                            progress: 35 + Math.floor(bi * 30 / batches.length),
-                        };
-                        try {
-                            const batchOutputs = await this.runCodingBatchSafe(llmClient, promptManager, batch, planFiles, fileInterfaces, generatedSummaries, sandbox.path, projectContext, errorHintCombined || undefined, architectOutput?.files, architectOutput?.crossFileRefs, architectOutput?.globalContext);
-                            codeOutputs.push(...batchOutputs);
-                            for (const output of batchOutputs) {
-                                generatedSummaries.set(output.path, extractInterfaceSummary(output));
-                            }
-                        }
-                        catch (batchErr) {
-                            log.error(`batch ${bi + 1} failed`, batchErr.message);
-                            yield {
-                                type: 'executing',
-                                phase: `batch ${bi + 1} failed: ${batchErr.message}`,
-                                progress: 35 + Math.floor(bi * 30 / batches.length),
-                            };
-                            batchFailed = true;
-                        }
-                    }
-                    if (batchFailed && codeOutputs.length === 0) {
-                        codeErrors.push(`第${codeAttempt}轮: 所有 batch 均失败`);
-                        continue;
-                    }
-                }
-            }
-            // ── 文件校验 ──
-            yield { type: 'executing', phase: 'validating-files', progress: 50 };
-            const planFilesFull = requirement.plan ?? [];
-            const fileMap = new Map();
-            for (const output of codeOutputs) {
-                if (output.path)
-                    fileMap.set(output.path, output);
-            }
-            const fullyGenerated = [];
-            const fallbackOriginal = [];
-            const criticalMissing = [];
-            for (const planFile of planFilesFull) {
-                if (fileMap.has(planFile.path)) {
-                    fullyGenerated.push(planFile.path);
+                const codingResult = yield* this.runCodingBatches(ctx, {
+                    codeAttempt, mergePlanWithInjections, failedFiles, codeErrors,
+                    codingRegressionHint, codingHint, previousOutputs, sandbox, staticGuardInjectPaths,
+                });
+                if (codingResult.failed)
                     continue;
-                }
-                if (isCriticalFile(planFile.changeDescription)) {
-                    criticalMissing.push(planFile.path);
-                }
-                else if (isSafeToFallback(planFile.path, planFile.changeDescription)) {
-                    try {
-                        const originalContent = await readFile(join(sandbox.path, planFile.path), 'utf-8');
-                        fileMap.set(planFile.path, { path: planFile.path, content: originalContent, summary: `[WARNING] LLM 未返回该文件变更，保留原始内容` });
-                        fallbackOriginal.push(planFile.path);
-                    }
-                    catch {
-                        fileMap.set(planFile.path, { path: planFile.path, content: '', summary: planFile.changeDescription });
-                        fallbackOriginal.push(planFile.path + ' (empty)');
-                    }
-                }
-                else {
-                    criticalMissing.push(planFile.path);
-                }
+                codeOutputs = codingResult.outputs;
             }
-            const fileValidationSummary = {
-                totalPlanFiles: planFilesFull.length,
-                fullyGenerated,
-                fallbackOriginal,
-                noChangeDetected: [],
-                criticalMissing,
-            };
-            finalFileValidationSummary = fileValidationSummary;
-            yield { type: 'file-validation', summary: fileValidationSummary };
+            // 依赖合法性校验
+            const depViolations = await this.checkDependencyViolations(codeOutputs, sandbox.path, codeAttempt, codeErrors, failedFiles);
+            if (depViolations) {
+                yield this.progress(`dependency violation: ${depViolations.map(v => v.imp).join(', ')}`, 50, [depViolations.map(v => `${v.file}: import '${v.imp}'`).join('\n')]);
+                if (ctx.executor)
+                    await ctx.executor('git checkout . && git clean -fd', { timeout: 30_000 }).catch(() => { });
+                continue;
+            }
+            // 文件校验（分级告警兜底）
+            const planFilesFull = mergePlanWithInjections(requirement.plan ?? []);
+            const planFilesToValidate = codeAttempt > 1 && failedFiles.size > 0
+                ? planFilesFull.filter(f => failedFiles.has(f.path))
+                : planFilesFull;
+            const validationResult = yield* this.validateFiles(ctx, codeOutputs, planFilesToValidate, codeAttempt);
+            if (!validationResult)
+                continue;
+            const { fileMap, fileValidationSummary, criticalMissing, fallbackOriginal } = validationResult;
+            // 关键文件缺失 → 重试
             if (criticalMissing.length > 0) {
-                const err = `关键文件生成失败: ${criticalMissing.join(', ')}`;
-                codeErrors.push(`第${codeAttempt}轮: ${err}`);
-                yield { type: 'executing', phase: `critical-missing: ${criticalMissing.length} 个关键文件未返回`, progress: 52, warnings: criticalMissing };
-                if (codeAttempt === MAX_RETRIES) {
-                    yield { type: 'failed', requirement, error: `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`, userMessage: `关键代码文件生成失败：${criticalMissing.join(', ')}。` };
-                    requirement.status = 'failed';
-                    await requirementMemory.saveRequirement(requirement);
+                codeErrors.push(`第${codeAttempt}轮: 关键文件生成失败，LLM 未返回: ${criticalMissing.join(', ')}`);
+                yield this.progress(`critical-missing: ${criticalMissing.length}`, 52, criticalMissing);
+                if (codeAttempt === this.MAX_RETRIES) {
+                    yield await this.failRequirement(ctx, `编码失败 (${this.MAX_RETRIES}轮):\n${codeErrors.join('\n')}`, `关键代码文件生成失败，AI 遗漏了核心变更文件：${criticalMissing.join(', ')}。请尝试重新描述需求。`, 'coding', null, `关键文件缺失: ${criticalMissing.join(', ')}`);
                     return;
                 }
                 continue;
             }
-            if (fallbackOriginal.length > 0) {
-                yield { type: 'executing', phase: `warning: ${fallbackOriginal.length} 个文件保留原始内容`, progress: 55, warnings: fallbackOriginal };
+            // 退化检测
+            const regressionResult = await this.checkRegressions(fileMap, planFilesToValidate, sandbox.path);
+            if (regressionResult) {
+                codingRegressionHint = regressionResult.hint;
+                codeErrors.push(`第${codeAttempt}轮: ${regressionResult.error}`);
+                yield this.progress(`regression-guard: ${regressionResult.count}`, 53, regressionResult.warnings);
+                if (codeAttempt === this.MAX_RETRIES) {
+                    yield await this.failRequirement(ctx, `编码失败 (${this.MAX_RETRIES}轮):\n${codeErrors.join('\n')}`, `生成代码与磁盘原版相比疑似大段丢失。涉及：${regressionResult.paths.join(', ')}。`, 'coding', regressionResult.paths[0], regressionResult.error);
+                    return;
+                }
+                continue;
             }
-            // 孤立组件检测（仅警告，不阻断）
-            // 注：此检测误报率高（route 文件、配置文件也会被误判为组件），暂时只记录不阻断
-            const orphanResult = await this.checkOrphanComponents(planFilesFull, fileMap, sandbox.path);
-            if (orphanResult.orphanFiles.length > 0) {
-                log.warn(`孤立组件检测（仅警告）: ${orphanResult.orphanFiles.join(', ')}`);
-                yield { type: 'executing', phase: `warning: ${orphanResult.orphanFiles.length} 个文件可能未被引用（仅警告）`, progress: 56, warnings: orphanResult.hints };
+            codingRegressionHint = '';
+            // 孤立组件检测
+            const orphanResult = await this.checkOrphanComponents(ctx, planFilesToValidate, planFilesFull, fileMap, sandbox.path, codeAttempt);
+            if (orphanResult) {
+                codeErrors.push(`第${codeAttempt}轮: ${orphanResult.error}`);
+                for (const f of orphanResult.files)
+                    failedFiles.add(f);
+                yield this.progress(`orphan-files: ${orphanResult.files.length}`, 56, orphanResult.hints);
+                if (codeAttempt === this.MAX_RETRIES) {
+                    yield await this.failRequirement(ctx, `编码失败 (${this.MAX_RETRIES}轮):\n${codeErrors.join('\n')}`, `组件未被集成到页面中：${orphanResult.files.join(', ')}。`, 'coding', null, orphanResult.error);
+                    return;
+                }
+                continue;
             }
-            // 最终结果校验
+            // Outlet/Nav 路由一致性检测
+            const outletResult = await this.checkOutletNavViolations(ctx, sandbox.path, projectContext, planFilesFull, fileMap, codeAttempt, staticGuardInjectPaths);
+            if (outletResult) {
+                codeErrors.push(`第${codeAttempt}轮: ${outletResult.error}`);
+                yield this.progress(`outlet-nav-route: ${outletResult.count}`, 57, outletResult.hints);
+                if (codeAttempt === this.MAX_RETRIES) {
+                    yield await this.failRequirement(ctx, `编码失败 (${this.MAX_RETRIES}轮):\n${codeErrors.join('\n')}`, `导航与路由表不一致。`, 'coding', outletResult.layoutPath ?? null, outletResult.error);
+                    return;
+                }
+                continue;
+            }
+            // 相对 import 解析检测
+            const importResult = await this.checkRelativeImportViolations(ctx, sandbox.path, projectContext, planFilesFull, fileMap, codeAttempt, failedFiles, staticGuardInjectPaths);
+            if (importResult) {
+                codeErrors.push(`第${codeAttempt}轮: ${importResult.error}`);
+                yield this.progress(`relative-import-resolve: ${importResult.count}`, 57.5, importResult.hints);
+                if (codeAttempt === this.MAX_RETRIES) {
+                    yield await this.failRequirement(ctx, `编码失败 (${this.MAX_RETRIES}轮):\n${codeErrors.join('\n')}`, `代码中存在无法解析的相对路径 import。`, 'coding', importResult.fromPath ?? null, importResult.error);
+                    return;
+                }
+                continue;
+            }
+            // 写入文件到沙箱
             const validOutputs = Array.from(fileMap.values());
             if (validOutputs.length === 0) {
                 codeErrors.push(`第${codeAttempt}轮: 编码阶段未生成有效文件`);
-                if (codeAttempt === MAX_RETRIES) {
-                    yield { type: 'failed', requirement, error: `编码失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`, userMessage: '代码生成失败。' };
-                    requirement.status = 'failed';
-                    await requirementMemory.saveRequirement(requirement);
+                if (codeAttempt === this.MAX_RETRIES) {
+                    yield await this.failRequirement(ctx, `编码失败 (${this.MAX_RETRIES}轮):\n${codeErrors.join('\n')}`, '代码生成失败，AI 未能生成有效的代码文件。', 'coding', null, '编码阶段未生成有效文件');
                     return;
                 }
                 continue;
             }
-            // 清理残留 .orig 文件
-            await this.cleanOrigFiles(sandbox.path);
-            // 写入前备份 + 写入文件
-            yield { type: 'executing', phase: 'writing-files', progress: 60 };
-            for (const file of validOutputs) {
-                const fullPath = join(sandbox.path, file.path);
-                const origBackupPath = fullPath + '.orig';
-                try {
-                    const exists = await readFile(fullPath, 'utf-8');
-                    await writeFile(origBackupPath, exists, 'utf-8');
-                }
-                catch {
-                    await mkdir(dirname(origBackupPath), { recursive: true });
-                    await writeFile(origBackupPath, '', 'utf-8');
-                }
-            }
-            for (const file of validOutputs) {
-                const fullPath = join(sandbox.path, file.path);
-                if (file.content.trim() === '__DELETE__') {
-                    try {
-                        await rm(fullPath, { force: true });
-                    }
-                    catch { }
-                }
-                else if (file.content.startsWith('__APPEND__\n')) {
-                    const appendContent = file.content.slice('__APPEND__\n'.length);
-                    try {
-                        const existing = await readFile(fullPath, 'utf-8');
-                        await writeFile(fullPath, existing + '\n' + appendContent, 'utf-8');
-                    }
-                    catch {
-                        await mkdir(dirname(fullPath), { recursive: true });
-                        await writeFile(fullPath, appendContent, 'utf-8');
-                    }
-                }
-                else {
-                    await mkdir(dirname(fullPath), { recursive: true });
-                    await writeFile(fullPath, file.content, 'utf-8');
-                }
-            }
-            // Diff 空变更检测
-            yield { type: 'executing', phase: 'diff-validation', progress: 62 };
-            for (const file of validOutputs) {
-                const origBackupPath = join(sandbox.path, file.path + '.orig');
-                try {
-                    const originalContent = await readFile(origBackupPath, 'utf-8');
-                    const newContent = await readFile(join(sandbox.path, file.path), 'utf-8');
-                    if (originalContent === newContent) {
-                        fileValidationSummary.noChangeDetected.push(file.path);
-                    }
-                }
-                catch { }
-            }
-            if (fileValidationSummary.noChangeDetected.length > 0) {
-                if (fileValidationSummary.noChangeDetected.length === validOutputs.length) {
-                    codeErrors.push(`第${codeAttempt}轮: 所有文件未产生变更`);
-                    if (codeAttempt === MAX_RETRIES) {
-                        yield { type: 'failed', requirement, error: `编码失败`, userMessage: '所有文件内容未变化。' };
-                        requirement.status = 'failed';
-                        await requirementMemory.saveRequirement(requirement);
-                        return;
-                    }
-                    continue;
-                }
-            }
+            yield* this.writeFilesToSandbox(ctx, validOutputs, fileValidationSummary);
             previousOutputs = codeOutputs;
-            // ── 硬阻断：结构性变更检测（标签替换、className 删除、export 删除、截断）──
-            yield { type: 'executing', phase: 'diff-safety-check', progress: 65 };
-            const diffChecker = new DiffSafetyChecker(sandbox.path, projectContext.semanticTags);
-            const safetyIssues = [];
-            for (const file of validOutputs) {
-                if (file.content.startsWith('__APPEND__\n'))
-                    continue; // CSS 追加模式跳过
-                const origBackupPath = join(sandbox.path, file.path + '.orig');
-                try {
-                    const originalContent = await readFile(origBackupPath, 'utf-8');
-                    const newContent = await readFile(join(sandbox.path, file.path), 'utf-8');
-                    const result = await diffChecker.checkFile(file.path, originalContent, newContent);
-                    if (!result.safe) {
-                        safetyIssues.push(...result.details);
-                    }
-                }
-                catch { }
+            finalFileValidationSummary = fileValidationSummary;
+            // 写入成功，编码阶段完成（测试由 TestingPhase 处理）
+            break;
+        }
+        // 编码成功
+        log.info('编码阶段完成', { fileCount: codeOutputs.length });
+        ctx._codingOutputs = codeOutputs;
+        ctx._fileValidationSummary = finalFileValidationSummary;
+        ctx._pastLessons = pastLessons;
+    }
+    // ============================================================
+    // 辅助方法
+    // ============================================================
+    async *runCodingBatches(ctx, opts) {
+        const { requirement, llmClient, promptManager, agentRunner, projectContext, sandbox } = ctx;
+        let planFiles = opts.mergePlanWithInjections(requirement.plan ?? []);
+        const lastTestError = opts.codeErrors.length > 0 ? opts.codeErrors[opts.codeErrors.length - 1] : undefined;
+        // 重试精简上下文
+        let sandboxFileListHint = '';
+        if (opts.codeAttempt > 1 && opts.failedFiles.size > 0) {
+            const passedFiles = planFiles.filter(f => !opts.failedFiles.has(f.path));
+            planFiles = planFiles.filter(f => opts.failedFiles.has(f.path));
+            if (planFiles.length === 0) {
+                planFiles = opts.mergePlanWithInjections(requirement.plan ?? []);
             }
-            if (safetyIssues.length > 0) {
-                const issueText = safetyIssues.join('\n');
-                codeErrors.push(`第${codeAttempt}轮: 检测到无关改动:\n${issueText}`);
-                log.warn(`diff-safety-check 检测到 ${safetyIssues.length} 个问题`, issueText);
-                yield {
-                    type: 'executing',
-                    phase: `diff-safety: ${safetyIssues.length} 个无关改动，回滚重试`,
-                    progress: 65,
-                    warnings: safetyIssues,
-                };
-                // 将具体问题反馈给下一轮 Coding Agent（从模板渲染）
-                const diffSafetyFeedback = await promptManager.loadAndRender('shared/diff-safety-error', {
-                    issues: issueText,
-                });
-                errorHintCombined = [
-                    errorHintCombined || '',
-                    '\n\n' + diffSafetyFeedback,
-                ].filter(Boolean).join('');
-                if (executor) {
-                    await executor('git checkout . && git clean -fd', { timeout: 30_000 }).catch(() => { });
-                }
-                if (codeAttempt === MAX_RETRIES) {
-                    yield { type: 'failed', requirement, error: `编码失败 (${MAX_RETRIES}轮): 无关改动未消除:\n${codeErrors.join('\n')}`, userMessage: 'AI 生成的代码包含非预期修改，请尝试简化需求描述。' };
-                    requirement.status = 'failed';
-                    await requirementMemory.saveRequirement(requirement);
-                    return;
-                }
-                continue;
-            }
-            // ── 测试阶段 ──
-            yield { type: 'status-change', status: 'testing', agent: 'test' };
-            yield { type: 'executing', phase: `testing (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 70 };
-            let testResult;
             try {
-                testResult = await testRunner.run({ lint: commands.lint, test: commands.test, build: commands.build });
-            }
-            catch (testExecErr) {
-                const errMsg = testExecErr?.message ?? String(testExecErr);
-                const isDockerError = errMsg.includes('No such container') || errMsg.includes('daemon');
-                codeErrors.push(`第${codeAttempt}轮测试执行异常: ${errMsg}`);
-                log.error(`测试执行异常`, errMsg);
-                yield { type: 'executing', phase: `test exec error: ${errMsg.slice(0, 100)}`, progress: 70, warnings: isDockerError ? ['Docker 容器异常，将重试'] : undefined };
-                if (codeAttempt === MAX_RETRIES) {
-                    yield { type: 'failed', requirement, error: `测试执行失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`, userMessage: '测试环境异常，请重试。' };
-                    requirement.status = 'failed';
-                    await requirementMemory.saveRequirement(requirement);
-                    return;
-                }
-                continue;
-            }
-            yield { type: 'test-result', passed: testResult.passed, details: JSON.stringify(testResult, null, 2) };
-            if (testResult.passed) {
-                for (const lesson of pastLessons) {
-                    await requirementMemory.markLessonResolved(lesson.id);
-                }
-                if (executor) {
-                    try {
-                        await executor('find . -name "*.orig" -delete', { timeout: 10_000 });
-                    }
-                    catch { }
-                }
-                break;
-            }
-            // 测试失败 → 构建增强错误上下文
-            const errorOutput = testResult.steps.filter(s => !s.passed).map(s => `${s.name}: ${s.output}`).join('\n---\n');
-            const errorFileContents = await extractAndReadErrorFiles(errorOutput, sandbox.path);
-            let enhancedError = `第${codeAttempt}轮测试失败:\n${errorOutput.slice(0, 2000)}`;
-            if (errorFileContents.length > 0) {
-                enhancedError += '\n\n## 错误涉及的源码文件\n' + errorFileContents.map(f => `### ${f.path}\n\`\`\`\n${f.content}\n\`\`\``).join('\n\n');
-            }
-            codeErrors.push(enhancedError);
-            if (executor) {
-                await executor('git checkout . && git clean -fd', { timeout: 30_000 }).catch(() => { });
-            }
-            if (codeAttempt === MAX_RETRIES) {
-                yield { type: 'failed', requirement, error: `编码+测试失败 (${MAX_RETRIES}轮):\n${codeErrors.join('\n')}`, userMessage: `代码测试未通过（已重试 ${MAX_RETRIES} 次）。` };
-                requirement.status = 'failed';
-                await requirementMemory.saveRequirement(requirement);
-                return;
-            }
-        }
-        // ── 测试通过 → Diff 准备 ──
-        const validOutputs = codeOutputs.filter(f => f.path && f.content);
-        if (typeof requirementMemory.saveChanges === 'function') {
-            await requirementMemory.saveChanges(requirement.id, validOutputs.map(f => ({
-                path: f.path,
-                action: f.content.trim() === '__DELETE__' ? 'deleted' : 'created',
-            })));
-        }
-        yield { type: 'executing', phase: 'diff-check', progress: 85 };
-        const changedFiles = await repoManager.getChangedFiles();
-        const expectedFiles = validOutputs.map(f => f.path);
-        const diffResult = await repoManager.diffCheck(expectedFiles);
-        if (diffResult.hasUnexpectedChanges) {
-            yield { type: 'executing', phase: `unexpected changes: ${diffResult.unexpectedFiles?.join(', ')}`, progress: 85 };
-        }
-        let diffContent = '';
-        if (executor) {
-            try {
-                const { stdout } = await executor('git diff', { timeout: 30_000 });
-                diffContent = stdout;
+                const { execSync } = await import('child_process');
+                const fileList = execSync('find . -type f \\( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" -o -name "*.json" \\) | grep -v node_modules | grep -v .git | sort', {
+                    cwd: sandbox.path, timeout: 5_000, encoding: 'utf-8',
+                }).slice(0, 3000);
+                sandboxFileListHint = `\n\n## ⚠️ 沙箱中实际存在的文件\n\`\`\`\n${fileList}\`\`\``;
             }
             catch { }
-        }
-        requirement.status = 'diff-ready';
-        await requirementMemory.saveRequirement(requirement);
-        yield {
-            type: 'diff-ready',
-            requirement,
-            diff: diffContent,
-            files: validOutputs.map(f => ({ path: f.path, summary: f.summary })),
-            diffCheck: diffResult,
-            fileValidationSummary: finalFileValidationSummary ?? undefined,
-        };
-    }
-    /**
-     * 手术式 Patch 模式
-     * 当全量重写反复触发 diff-safety 时，改用此模式
-     * AI 只输出要插入/替换的具体行，系统做精确手术
-     */
-    async runPatchMode(llmClient, promptManager, planFile, originalContent, sandboxPath, projectContext, errorHint, detailedChange) {
-        const systemPrompt = await promptManager.load('coding/patch-system');
-        const lines = originalContent.split('\n');
-        const numberedContent = lines.map((line, i) => `${i + 1}: ${line}`).join('\n');
-        const userMessage = `## 文件: ${planFile.path}
-
-## 改动要求
-${detailedChange ?? planFile.changeDescription}
-
-## 原文件内容（带行号）
-\`\`\`
-${numberedContent}
-\`\`\`
-${errorHint ? `\n${errorHint}` : ''}`;
-        const messages = [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userMessage },
-        ];
-        const response = await llmClient.chat(messages, {
-            tools: PATCH_TOOLS,
-            agent: 'coding-patch',
-            maxTokens: 4096,
-        });
-        let patchOps = [];
-        if (response.toolCalls && response.toolCalls.length > 0) {
-            const tc = response.toolCalls[0];
-            if (tc.name === 'submit_patch' && tc.arguments?.operations) {
-                patchOps = tc.arguments.operations;
+            const availableDeps = await extractAvailableDependencies(sandbox.path);
+            if (availableDeps.size > 0) {
+                sandboxFileListHint += `\n\n## ⚠️ 可用依赖（只允许 import 以下包）\n${[...availableDeps].sort().join(', ')}`;
             }
         }
-        if (patchOps.length === 0) {
-            log.warn(`patch 模式未返回有效操作: ${planFile.path}`);
+        const errorHintCombined = [
+            opts.codingHint, opts.codingRegressionHint,
+            lastTestError ? `\n\n## 上轮测试失败\n${lastTestError}\n请分析错误根因并修正代码。` : '',
+            opts.codeAttempt > 1 && opts.previousOutputs.length > 0
+                ? '\n\n## 上轮生成的代码（仅供参考）\n' + opts.previousOutputs.map(f => `- ${f.path}: ${f.summary}`).join('\n')
+                : '',
+            sandboxFileListHint,
+        ].filter(Boolean).join('');
+        // Architect 分析
+        yield this.progress(`architect analyzing ${planFiles.length} files...`, 32);
+        let architectOutput = null;
+        for (let archAttempt = 1; archAttempt <= 2; archAttempt++) {
+            try {
+                if (requirement.structuredRequirement) {
+                    architectOutput = await runArchitect(agentRunner, promptManager, planFiles, sandbox.path, projectContext, requirement.structuredRequirement);
+                }
+                if (architectOutput)
+                    break;
+            }
+            catch (archErr) {
+                log.warn(`Architect 分析异常 (${archAttempt}/2)`, { error: archErr.message });
+            }
+        }
+        let batches, fileInterfaces;
+        if (architectOutput) {
+            batches = architectOutput.batches;
+            fileInterfaces = await extractFileInterfaces(sandbox.path, planFiles);
+            yield this.progress(`architect: ${batches.length} batches, ${architectOutput.crossFileRefs.length} cross-refs`, 34);
+        }
+        else {
+            const fallback = await buildBatches(sandbox.path, planFiles);
+            batches = fallback.batches;
+            fileInterfaces = fallback.fileInterfaces;
+            const MAX_BATCH_SIZE = 3;
+            const normalized = [];
+            for (const batch of batches) {
+                if (batch.files.length <= MAX_BATCH_SIZE) {
+                    normalized.push(batch);
+                }
+                else {
+                    for (let i = 0; i < batch.files.length; i += MAX_BATCH_SIZE) {
+                        normalized.push({ files: batch.files.slice(i, i + MAX_BATCH_SIZE), reason: `${batch.reason}（拆分）` });
+                    }
+                }
+            }
+            batches = normalized;
+        }
+        // 分批 Coding
+        const generatedSummaries = new Map();
+        let batchFailed = false;
+        const codeOutputs = [];
+        for (let bi = 0; bi < batches.length; bi++) {
+            const batch = batches[bi];
+            yield this.progress(`coding batch ${bi + 1}/${batches.length}: ${batch.files.join(', ')}`, 35 + Math.floor(bi * 30 / batches.length));
+            try {
+                const batchOutputs = await runCodingBatch(llmClient, promptManager, batch, planFiles, fileInterfaces, generatedSummaries, sandbox.path, projectContext, errorHintCombined || undefined, architectOutput?.files, architectOutput?.crossFileRefs, architectOutput?.globalContext);
+                codeOutputs.push(...batchOutputs);
+                for (const output of batchOutputs) {
+                    generatedSummaries.set(output.path, extractInterfaceSummary(output));
+                }
+            }
+            catch (batchErr) {
+                log.error(`batch ${bi + 1} failed`, { error: batchErr.message });
+                batchFailed = true;
+            }
+        }
+        if (batchFailed && codeOutputs.length === 0) {
+            opts.codeErrors.push(`第${opts.codeAttempt}轮: 所有 batch 均失败`);
+            return { outputs: [], failed: true };
+        }
+        return { outputs: codeOutputs, failed: false };
+    }
+    async checkDependencyViolations(outputs, sandboxPath, codeAttempt, codeErrors, failedFiles) {
+        const availableDeps = await extractAvailableDependencies(sandboxPath);
+        const violations = validateImports(outputs, availableDeps);
+        if (violations.length === 0)
             return null;
+        const violationMsg = violations.map(v => `${v.file}: import '${v.imp}'`).join('\n');
+        codeErrors.push(`第${codeAttempt}轮: 使用了未安装的依赖库：\n${violationMsg}`);
+        for (const v of violations)
+            failedFiles.add(v.file);
+        return violations;
+    }
+    async *validateFiles(ctx, codeOutputs, planFiles, codeAttempt) {
+        const { sandbox } = ctx;
+        yield this.progress('validating-files', 50);
+        const { readFile } = await import('fs/promises');
+        const fileMap = new Map();
+        for (const output of codeOutputs) {
+            if (output.path)
+                fileMap.set(output.path, output);
         }
-        // 应用 patch 操作
-        let resultLines = [...lines];
-        let offset = 0; // 行号偏移（插入/删除导致的偏移）
-        for (const op of patchOps) {
-            if (op.type === 'append') {
-                resultLines.push(...op.content.split('\n'));
+        const fullyGenerated = [];
+        const fallbackOriginal = [];
+        const criticalMissing = [];
+        const CRITICAL_KEYWORDS = ['新增', 'add', '修改', 'update', '重构', 'refactor', '删除', 'delete', '实现', 'implement'];
+        const SAFE_EXT = [/\.md$/, /\.txt$/, /\.json$/, /\.yaml$/, /\.yml$/];
+        const SUSPICIOUS = ['参考', '查看', '阅读', 'refer', 'read', '了解', '分析', 'analyze'];
+        for (const planFile of planFiles) {
+            if (fileMap.has(planFile.path)) {
+                fullyGenerated.push(planFile.path);
+                continue;
             }
-            else if (op.type === 'insert_after') {
-                const insertPos = (op.line ?? resultLines.length) + offset;
-                const newLines = op.content.split('\n');
-                resultLines.splice(insertPos, 0, ...newLines);
-                offset += newLines.length;
+            const lowerDesc = planFile.changeDescription.toLowerCase();
+            const isCritical = CRITICAL_KEYWORDS.some(k => lowerDesc.includes(k.toLowerCase()));
+            const isSafe = SAFE_EXT.some(p => p.test(planFile.path)) || SUSPICIOUS.some(k => lowerDesc.includes(k.toLowerCase()));
+            if (isCritical) {
+                criticalMissing.push(planFile.path);
             }
-            else if (op.type === 'replace_lines') {
-                const start = (op.line ?? 1) + offset - 1;
-                const end = (op.endLine ?? op.line ?? resultLines.length) + offset - 1;
-                const newLines = op.content.split('\n');
-                resultLines.splice(start, end - start + 1, ...newLines);
-                offset += newLines.length - (end - start + 1);
+            else if (isSafe) {
+                try {
+                    const originalContent = await readFile(join(sandbox.path, planFile.path), 'utf-8');
+                    fileMap.set(planFile.path, { path: planFile.path, content: originalContent, summary: '[WARNING] LLM 未返回该文件变更，保留原始内容' });
+                    fallbackOriginal.push(planFile.path);
+                }
+                catch {
+                    fileMap.set(planFile.path, { path: planFile.path, content: '', summary: planFile.changeDescription });
+                    fallbackOriginal.push(planFile.path + ' (empty)');
+                }
+            }
+            else {
+                criticalMissing.push(planFile.path);
             }
         }
+        const fileValidationSummary = {
+            totalPlanFiles: planFiles.length,
+            fullyGenerated,
+            fallbackOriginal,
+            noChangeDetected: [],
+            criticalMissing,
+        };
+        yield { type: 'file-validation', summary: fileValidationSummary };
+        if (fallbackOriginal.length > 0) {
+            yield this.progress(`warning: ${fallbackOriginal.length} 个文件保留原始内容`, 55, fallbackOriginal);
+        }
+        return { fileMap, fileValidationSummary, criticalMissing, fallbackOriginal };
+    }
+    async checkRegressions(fileMap, planFiles, sandboxPath) {
+        if (process.env.THEHAND_DISABLE_REGRESSION_GUARD === '1')
+            return null;
+        const SRC_FOR_REGRESSION = /\.(jsx?|tsx|vue)$/;
+        const { readFile } = await import('fs/promises');
+        const regressions = [];
+        for (const planFile of planFiles) {
+            if (!SRC_FOR_REGRESSION.test(planFile.path))
+                continue;
+            const out = fileMap.get(planFile.path);
+            if (!out?.content || out.content === '__DELETE__')
+                continue;
+            let originalOnDisk = '';
+            try {
+                originalOnDisk = await readFile(join(sandboxPath, planFile.path), 'utf-8');
+            }
+            catch {
+                continue;
+            }
+            const { suspicious, reasons } = detectCodingRegression(originalOnDisk, out.content);
+            if (suspicious && reasons.length > 0)
+                regressions.push({ path: planFile.path, reasons });
+        }
+        if (regressions.length === 0)
+            return null;
+        const hint = formatRegressionRetryHint(regressions);
         return {
-            path: planFile.path,
-            content: resultLines.join('\n'),
-            summary: `[patch mode] ${planFile.changeDescription}`,
+            hint,
+            error: `编码退化检测：${regressions.map(r => r.path).join(', ')}`,
+            count: regressions.length,
+            warnings: regressions.flatMap(r => r.reasons.map(reason => `${r.path}: ${reason}`)),
+            paths: regressions.map(r => r.path),
         };
     }
-    /** 安全调用 runCodingBatch，捕获异常 */
-    async runCodingBatchSafe(...args) {
-        return runCodingBatch(...args);
-    }
-    async checkOrphanComponents(planFilesFull, fileMap, sandboxPath) {
+    async checkOrphanComponents(ctx, planFiles, planFilesFull, fileMap, sandboxPath, codeAttempt) {
+        const { projectContext } = ctx;
         const COMPONENT_EXTS = /\.(jsx?|tsx|vue)$/;
         const STYLE_ASSET_EXTS = /\.(css|scss|less|svg|png|jpg|json)$/;
         const BARREL_EXTS = /\/index\.(jsx?|tsx|js|ts)$/;
-        const generatedComponentFiles = planFilesFull.filter(f => {
+        const generatedComponentFiles = planFiles.filter(f => {
             if (STYLE_ASSET_EXTS.test(f.path))
                 return false;
             if (!COMPONENT_EXTS.test(f.path))
                 return false;
             if (BARREL_EXTS.test(f.path))
                 return false;
+            if (skipOrphanImportIntegrationCheck(f.path, projectContext.thehand?.orphanGuard))
+                return false;
+            const backendDir = projectContext.structure.backend?.replace(/\/$/, '') || 'backend';
+            if (f.path.startsWith(backendDir + '/') || f.path === backendDir)
+                return false;
             return fileMap.has(f.path);
         });
         if (generatedComponentFiles.length === 0)
-            return { orphanFiles: [], hints: [], error: '' };
-        const projectFiles = new Map();
-        try {
-            const scanDir = async (dir) => {
-                const entries = await readdir(dir, { withFileTypes: true });
-                for (const e of entries) {
-                    if (e.name.startsWith('.') || e.name === 'node_modules' || e.name === 'dist' || e.name === 'build')
-                        continue;
-                    const fullPath = join(dir, e.name);
-                    if (e.isDirectory()) {
-                        await scanDir(fullPath);
-                    }
-                    else if (COMPONENT_EXTS.test(e.name) || /\.(js|ts)$/.test(e.name)) {
-                        try {
-                            const content = await readFile(fullPath, 'utf-8');
-                            const relPath = fullPath.replace(sandboxPath, '').replace(/^[/\\]/, '').replace(/\\/g, '/');
-                            projectFiles.set(relPath, content);
-                        }
-                        catch { }
-                    }
-                }
-            };
-            await scanDir(join(sandboxPath, 'frontend/src'));
-        }
-        catch { }
+            return null;
+        let sandboxSourceIndex;
         const orphanFiles = [];
         const orphanHints = [];
+        const knownFromBatch = new Set(fileMap.keys());
         for (const nf of generatedComponentFiles) {
             const baseName = nf.path.split('/').pop()?.replace(/\.(jsx?|tsx|vue)$/, '') ?? '';
             if (!baseName)
                 continue;
-            const importedByPlan = Array.from(fileMap.values()).some(other => {
+            let isImported = Array.from(fileMap.values()).some(other => {
                 if (other.path === nf.path)
                     return false;
-                if (BARREL_EXTS.test(other.path) || STYLE_ASSET_EXTS.test(other.path))
+                if (BARREL_EXTS.test(other.path))
                     return false;
-                return new RegExp(`from\\s+['"][^'"]*${baseName}['"]`).test(other.content) || other.content.includes(`import('${nf.path}')`);
+                if (STYLE_ASSET_EXTS.test(other.path))
+                    return false;
+                return sourceFileImportsTargetModule(other.content, other.path, nf.path, knownFromBatch);
             });
-            if (importedByPlan)
-                continue;
-            const importedByExisting = Array.from(projectFiles.entries()).some(([path, content]) => {
-                if (path === nf.path)
-                    return false;
-                if (BARREL_EXTS.test(path) || STYLE_ASSET_EXTS.test(path))
-                    return false;
-                return new RegExp(`from\\s+['"][^'"]*${baseName}['"]`).test(content) || content.includes(`import('${nf.path}')`);
-            });
-            if (importedByExisting)
-                continue;
-            orphanFiles.push(nf.path);
-            orphanHints.push(`${nf.path} 未被任何文件 import，必须修改父组件来 import 并使用它`);
+            if (!isImported) {
+                if (!sandboxSourceIndex) {
+                    sandboxSourceIndex = await loadSandboxSourceContents(sandboxPath, projectContext.structure);
+                    for (const o of fileMap.values()) {
+                        if (!o.path || o.content === '__DELETE__')
+                            continue;
+                        if (!/\.(jsx?|tsx|vue|mjs|cjs)$/.test(o.path))
+                            continue;
+                        sandboxSourceIndex.set(o.path.replace(/\\/g, '/'), o.content);
+                    }
+                }
+                isImported = sandboxIndexImportsComponent(sandboxSourceIndex, nf.path, baseName);
+            }
+            if (!isImported) {
+                orphanFiles.push(nf.path);
+                const normPath = nf.path.replace(/\\/g, '/');
+                if (isRouteTableModulePath(normPath)) {
+                    const entry = pickApplicationEntryForRouteTable(sandboxPath, projectContext);
+                    orphanHints.push(entry
+                        ? `${nf.path} 未被相对 import。应在应用入口 ${entry} 中 import 并挂接该路由表。`
+                        : `${nf.path} 未被任何文件 import。请在应用入口中 import 并挂载该路由表。`);
+                }
+                else {
+                    orphanHints.push(`${nf.path} 未被任何文件 import，必须修改父组件来 import 并使用它`);
+                }
+            }
         }
-        return { orphanFiles, hints: orphanHints, error: orphanFiles.length > 0 ? `组件孤立: ${orphanHints.join('\n')}` : '' };
+        if (orphanFiles.length === 0)
+            return null;
+        return { files: orphanFiles, hints: orphanHints, error: `组件孤立（未被父组件 import）:\n${orphanHints.join('\n')}` };
     }
-    async cleanOrigFiles(sandboxPath) {
+    async checkOutletNavViolations(ctx, sandboxPath, projectContext, planFilesFull, fileMap, codeAttempt, staticGuardInjectPaths) {
+        if (process.env.THEHAND_DISABLE_OUTLET_NAV_GUARD === '1')
+            return null;
+        const outletViolations = await findOutletNavRouteViolations(sandboxPath, projectContext, planFilesFull, fileMap);
+        if (outletViolations.length === 0)
+            return null;
+        const hints = outletViolations.map(v => v.message);
+        if (codeAttempt < this.MAX_RETRIES) {
+            const injectPaths = collectRouteIntegrationContextPaths(sandboxPath, projectContext);
+            for (const p of injectPaths)
+                staticGuardInjectPaths.add(p.replace(/\\/g, '/'));
+        }
+        return {
+            count: outletViolations.length,
+            hints,
+            error: `嵌套路由未注册:\n${hints.join('\n')}`,
+            layoutPath: outletViolations[0]?.layoutPath,
+        };
+    }
+    async checkRelativeImportViolations(ctx, sandboxPath, projectContext, planFilesFull, fileMap, codeAttempt, failedFiles, staticGuardInjectPaths) {
+        if (process.env.THEHAND_DISABLE_RELATIVE_IMPORT_GUARD === '1')
+            return null;
+        const importViolations = await findUnresolvedRelativeImportsInFileMap(sandboxPath, projectContext, planFilesFull, fileMap);
+        if (importViolations.length === 0)
+            return null;
+        const hints = importViolations.map(v => v.message);
+        for (const v of importViolations) {
+            if (v.fromPath)
+                failedFiles.add(v.fromPath);
+            staticGuardInjectPaths.add(v.fromPath.replace(/\\/g, '/'));
+        }
+        return {
+            count: importViolations.length,
+            hints,
+            error: `相对 import 无法解析:\n${hints.join('\n')}`,
+            fromPath: importViolations[0]?.fromPath,
+        };
+    }
+    async *writeFilesToSandbox(ctx, validOutputs, fileValidationSummary) {
+        const { writeFile, mkdir, rm, readFile, unlink, readdir } = await import('fs/promises');
+        const sandboxPath = ctx.sandbox.path;
+        // 清理残留 .orig 文件
         try {
             const walkDir = async (dir) => {
                 const results = [];
                 const entries = await readdir(dir, { withFileTypes: true });
                 for (const e of entries) {
                     const fullPath = join(dir, e.name);
-                    if (e.isDirectory()) {
+                    if (e.isDirectory())
                         results.push(...(await walkDir(fullPath)));
-                    }
-                    else if (e.name.endsWith('.orig')) {
+                    else if (e.name.endsWith('.orig'))
                         results.push(fullPath);
-                    }
                 }
                 return results;
             };
             const oldOrigFiles = await walkDir(sandboxPath);
-            for (const f of oldOrigFiles) {
+            for (const f of oldOrigFiles)
                 await unlink(f).catch(() => { });
-            }
         }
         catch { }
+        // 备份原始文件 + 写入新文件
+        yield this.progress('writing-files', 60);
+        for (const file of validOutputs) {
+            const fullPath = join(sandboxPath, file.path);
+            const origBackupPath = fullPath + '.orig';
+            try {
+                const exists = await readFile(fullPath, 'utf-8');
+                await writeFile(origBackupPath, exists, 'utf-8');
+            }
+            catch {
+                await mkdir(dirname(origBackupPath), { recursive: true });
+                await writeFile(origBackupPath, '', 'utf-8');
+            }
+        }
+        for (const file of validOutputs) {
+            const fullPath = join(sandboxPath, file.path);
+            if (file.content.trim().includes('__DELETE__')) {
+                try {
+                    await rm(fullPath, { force: true });
+                    yield this.progress(`deleted: ${file.path}`, 60);
+                }
+                catch {
+                    yield this.progress(`delete skipped: ${file.path}`, 60);
+                }
+            }
+            else {
+                await mkdir(dirname(fullPath), { recursive: true });
+                await writeFile(fullPath, file.content, 'utf-8');
+                yield this.progress(`wrote: ${file.path}`, 60);
+            }
+        }
+        // Diff 空变更检测
+        yield this.progress('diff-validation', 62);
+        const { readFile: rf } = await import('fs/promises');
+        for (const file of validOutputs) {
+            try {
+                const orig = await rf(join(sandboxPath, file.path + '.orig'), 'utf-8');
+                const next = await rf(join(sandboxPath, file.path), 'utf-8');
+                if (orig === next)
+                    fileValidationSummary.noChangeDetected.push(file.path);
+            }
+            catch { }
+        }
     }
-}
-function isCriticalFile(changeDesc) {
-    const CRITICAL_KEYWORDS = ['新增', 'add', 'Add', 'ADD', '修改', 'update', 'Update', 'UPDATE', '重构', 'refactor', 'Refactor', '删除', 'delete', 'Delete', 'DELETE', '实现', 'implement', 'Implement'];
-    return CRITICAL_KEYWORDS.some(k => changeDesc.toLowerCase().includes(k.toLowerCase()));
-}
-function isSafeToFallback(filePath, changeDesc) {
-    if (/\.md$|\.txt$|\.json$|\.yaml$|\.yml$/.test(filePath))
-        return true;
-    return ['参考', '查看', '阅读', 'refer', 'read', '了解', '分析', 'analyze'].some(k => changeDesc.toLowerCase().includes(k));
+    async failRequirement(ctx, detailedError, userMessage, phase, filePath, errorSummary) {
+        const { requirement, requirementMemory } = ctx;
+        transition(requirement, 'failed', userMessage);
+        await requirementMemory.saveRequirement(requirement);
+        await requirementMemory.saveLesson({
+            id: crypto.randomUUID(),
+            projectId: ctx.projectId,
+            requirementId: requirement.id,
+            phase,
+            filePath,
+            errorSummary,
+            errorDetail: detailedError,
+            fixHint: null,
+            resolved: false,
+            createdAt: new Date(),
+        });
+        return { type: 'failed', requirement, error: detailedError, userMessage };
+    }
 }
 //# sourceMappingURL=coding-phase.js.map

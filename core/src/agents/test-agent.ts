@@ -34,6 +34,9 @@ export const TEST_OUTPUT_TOOL: ToolDefinition = {
 
 /**
  * 测试 Agent：执行 lint、单测、集成测试，验证生成代码的正确性
+ * 
+ * @deprecated 当前测试逻辑由 TestRunner 直接执行，此定义保留供未来 Agent-based 测试使用。
+ * 如果未来需要让 LLM 分析测试结果并自动修复，可以通过 AgentRunner 调用此定义。
  */
 export function createTestAgent(): AgentDefinition {
   return {
@@ -56,36 +59,59 @@ export function createTestAgent(): AgentDefinition {
 
 /**
  * 边界测试生成 Agent：分析变更代码，生成补充测试用例
+ *
+ * 优化点（v2）：
+ * - 注入沙箱环境先验知识，避免用 find/head 等命令试错
+ * - maxRounds 从 30 降到 15，减少无效循环
+ * - 明确测试命令模板，避免路径试错
+ * - 限制工具调用次数提示，鼓励高效执行
  */
-export function createBoundaryTestAgent(): AgentDefinition {
+export function createBoundaryTestAgent(sandboxInfo?: {
+  testCommand?: string
+  testFramework?: string
+  changedFiles?: string[]
+}): AgentDefinition {
+  const testCmd = sandboxInfo?.testCommand ?? 'npm test -- --runInBand'
+  const framework = sandboxInfo?.testFramework ?? 'vitest'
+  const changedFilesList = sandboxInfo?.changedFiles?.join(', ') ?? '（见 PM 输入）'
+
   return {
     name: 'boundary-test',
     description: '分析变更代码，生成边界条件测试用例',
     systemPrompt: `你是测试专家。分析本次修改的代码，识别未覆盖的边界条件，生成补充测试用例。
 
-## 工作流程
+## 沙箱环境（重要！）
 
-1. 用 file-read 读取本次修改的文件
+- 项目结构：前端在 \`frontend/\` 子目录，后端在 \`backend/\` 子目录
+- 测试框架：${framework}（已预装，无需安装）
+- 测试命令：\`cd frontend && ${testCmd}\`（前端），\`cd backend && ${testCmd}\`（后端）
+- 不要使用 \`head\`、\`which\`、\`locate\` 等命令（沙箱可能不存在）
+- 查找文件请用 file-read 直接读取已知路径，不要用 shell find 搜索
+- 修改的文件：${changedFilesList}
+
+## 工作流程（请严格按顺序，控制在 8 轮内完成）
+
+1. 用 file-read 逐个读取本次修改的文件（不要搜索文件，路径已在上方列出）
 2. 分析每个函数的输入类型、边界条件、错误路径
-3. 检测项目已有的测试框架（查看已有 .test.js 文件的 import 模式）
-4. 生成测试文件，用 file-write 写入磁盘
-5. 用 shell 运行测试（npm test -- --runInBand 或项目配置的测试命令）
-6. 如果测试失败，分析原因并修复测试代码（最多 2 次）
+3. 用 file-read 读取 1 个已有 .test.js 文件了解测试框架的 import 模式（如已知路径）
+4. 生成测试文件，用 file-write 写入磁盘（与被测文件同目录，.test.js/.test.jsx 后缀）
+5. 用 shell 运行测试：\`cd frontend && ${testCmd}\`
+6. 如果测试失败，分析原因并修复测试代码（最多修复 2 次）
+7. 通过 submit_test_result 提交结果
 
 ## 测试生成规则
 
-- 使用项目的测试框架（vitest/jest/mocha）和已有的 mock 模式
+- 使用项目的测试框架和已有的 mock 模式
 - 对 Sequelize 模型方法使用 mock（vi.fn()），不依赖真实数据库
-- 覆盖场景：null/undefined 输入、空数组、类型不匹配、权限不足、关联未加载
-- 测试文件路径遵循项目约定（与被测文件同目录，.test.js 后缀）
+- 覆盖场景：null/undefined 输入、空数组、类型不匹配
 - 不要修改已有的测试文件，只新增
-- 如果项目已有该函数的测试，只补充缺失的边界用例
+- 每个被测文件最多生成 1 个测试文件
 
 ## 输出
 
 通过 submit_test_result 提交结果。如果生成了测试文件并全部通过，passed 为 true。`,
     tools: ['shell', 'file-read', 'file-write'],
-    maxRounds: 30,
+    maxRounds: 15,
     outputTool: TEST_OUTPUT_TOOL,
   }
 }

@@ -144,6 +144,13 @@ export class AgentRunner {
           })
         }
 
+        // ── 上下文压缩：超过 5 轮后压缩早期消息，防止 token 膨胀 ──
+        if (rounds >= 5 && messages.length > 14) {
+          const before = messages.length
+          messages = this.compactMessages(messages)
+          console.log(`[agent:${agent.name}] 上下文压缩: ${before} → ${messages.length} 条消息`)
+        }
+
         continue
       }
 
@@ -234,6 +241,50 @@ export class AgentRunner {
 
     // 返回原始文本
     return content
+  }
+
+  /**
+   * 压缩消息历史，保留最近 3 轮完整对话，早期轮次压缩为摘要
+   * 解决长循环中 token 膨胀问题（如边界测试 Agent 的 13 轮灾难）
+   */
+  private compactMessages(messages: Message[]): Message[] {
+    if (messages.length <= 6) return messages  // system + user + 2轮 = 6条，无需压缩
+
+    const system = messages[0]  // system prompt
+    const user = messages[1]    // initial user message
+    const RECENT_PAIRS = 3      // 保留最近 3 轮完整对话（6 条消息）
+    const recentCount = RECENT_PAIRS * 2
+    const earlyMessages = messages.slice(2, -recentCount)
+    const recentMessages = messages.slice(-recentCount)
+
+    // 压缩早期消息：提取工具调用摘要
+    const summaryLines: string[] = []
+    for (const msg of earlyMessages) {
+      const content = typeof msg.content === 'string' ? msg.content : ''
+      if (msg.role === 'assistant' && content.length > 0) {
+        summaryLines.push(`[assistant] ${content.slice(0, 150)}`)
+      } else if (msg.role === 'user' && content.startsWith('Tool result for ')) {
+        // 提取工具名和结果摘要
+        const toolMatch = content.match(/Tool result for (\w+):\n([\s\S]{0,200})/)
+        if (toolMatch) {
+          const toolName = toolMatch[1]
+          const resultPreview = toolMatch[2].slice(0, 100)
+          const isError = resultPreview.includes('失败') || resultPreview.includes('error') || resultPreview.includes('Error')
+          summaryLines.push(`[tool:${toolName}] ${isError ? '❌ ' : '✓ '}${resultPreview}`)
+        }
+      }
+    }
+
+    const summary = summaryLines.length > 0
+      ? `[早期工具调用摘要 - 以下是之前轮次的操作记录，请勿重复执行]\n${summaryLines.join('\n')}`
+      : '[早期轮次无重要操作记录]'
+
+    return [
+      system,
+      user,
+      { role: 'user' as const, content: summary },
+      ...recentMessages,
+    ]
   }
 
   /**

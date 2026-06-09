@@ -29,6 +29,8 @@ export interface OrchestratorDeps {
 export declare class Orchestrator {
     private deps;
     private sandboxShouldCleanup;
+    private logger;
+    private tokenBudget;
     constructor(deps: OrchestratorDeps);
     /**
      * 主循环：根据需求状态调度对应 Agent

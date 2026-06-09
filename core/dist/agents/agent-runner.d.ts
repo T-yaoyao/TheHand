@@ -31,6 +31,11 @@ export declare class AgentRunner {
      */
     private parseOutput;
     /**
+     * 压缩消息历史，保留最近 3 轮完整对话，早期轮次压缩为摘要
+     * 解决长循环中 token 膨胀问题（如边界测试 Agent 的 13 轮灾难）
+     */
+    private compactMessages;
+    /**
      * 将 Zod schema 转换为 JSON Schema（简化版）
      */
     private zodToJsonSchema;

@@ -192,7 +192,7 @@ export class LLMClient {
       outputTokens: data.usage?.completion_tokens ?? 0,
     }
 
-    // Token 追踪（限制历史长度避免内存泄漏）
+    // Token 追踪（限制历史长度避免内存泄漏，上限 200 条足够单次 run 分析）
     this.tokenHistory.push({
       agent: options?.agent ?? 'unknown',
       inputTokens: usage.inputTokens,
@@ -200,8 +200,8 @@ export class LLMClient {
       latencyMs,
       timestamp: new Date(),
     })
-    if (this.tokenHistory.length > 1000) {
-      this.tokenHistory = this.tokenHistory.slice(-500)
+    if (this.tokenHistory.length > 200) {
+      this.tokenHistory = this.tokenHistory.slice(-100)
     }
 
     // 解析 tool_calls：合并多路径、规范化 arguments（object / JSON 字符串 / 围栏）
@@ -283,7 +283,27 @@ export class LLMClient {
    * 获取 Token 使用统计
    */
   getStats() {
-    const total = this.tokenHistory.reduce(
+    return this.aggregateStats(this.tokenHistory)
+  }
+
+  /**
+   * 获取指定时间之后的 Token 统计（用于单次 run 的精确成本计算）
+   * 解决单例 LLMClient 累积统计导致成本失真的问题
+   */
+  getStatsSince(since: Date): ReturnType<typeof this.getStats> {
+    const filtered = this.tokenHistory.filter(r => r.timestamp >= since)
+    return this.aggregateStats(filtered)
+  }
+
+  /**
+   * 重置统计历史（谨慎使用，主要用于测试）
+   */
+  resetStats(): void {
+    this.tokenHistory = []
+  }
+
+  private aggregateStats(records: TokenRecord[]) {
+    const total = records.reduce(
       (acc, r) => ({
         inputTokens: acc.inputTokens + r.inputTokens,
         outputTokens: acc.outputTokens + r.outputTokens,

@@ -1,26 +1,27 @@
+import type { OrchestratorEvent, PhaseContext } from '../../types.js';
+import { BasePhaseHandler } from '../phase-handler.js';
 /**
- * 编码+测试阶段
- * Architect 分析 → 分批编码 → 文件校验 → 测试 → Diff 生成
+ * 编码阶段处理器
  *
- * 支持三种输出模式：
- * 1. 全量重写（默认）- AI 输出完整文件
- * 2. __APPEND__ 追加 - CSS 等大文件只追加新内容
- * 3. __PATCH__ 手术式编辑 - diff-safety 失败后自动切换，AI 只输出要改的行
+ * 职责：
+ * - Architect 分析依赖 + 分批
+ * - 分批 Coding（LLM 生成代码）
+ * - 多层校验（依赖、退化、孤立组件、路由一致性、import 解析）
+ * - 写入沙箱 + Diff 验证
+ * - 最多 3 轮重试
  */
-import type { Phase, PhaseContext } from '../phase.js';
-import type { OrchestratorEvent } from '../../types.js';
-export declare class CodingPhase implements Phase {
+export declare class CodingPhase extends BasePhaseHandler {
     readonly name = "coding";
-    run(ctx: PhaseContext): AsyncGenerator<OrchestratorEvent>;
-    /**
-     * 手术式 Patch 模式
-     * 当全量重写反复触发 diff-safety 时，改用此模式
-     * AI 只输出要插入/替换的具体行，系统做精确手术
-     */
-    private runPatchMode;
-    /** 安全调用 runCodingBatch，捕获异常 */
-    private runCodingBatchSafe;
+    private readonly MAX_RETRIES;
+    execute(ctx: PhaseContext): AsyncGenerator<OrchestratorEvent>;
+    private runCodingBatches;
+    private checkDependencyViolations;
+    private validateFiles;
+    private checkRegressions;
     private checkOrphanComponents;
-    private cleanOrigFiles;
+    private checkOutletNavViolations;
+    private checkRelativeImportViolations;
+    private writeFilesToSandbox;
+    private failRequirement;
 }
 //# sourceMappingURL=coding-phase.d.ts.map

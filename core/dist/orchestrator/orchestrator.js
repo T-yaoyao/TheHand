@@ -19,6 +19,9 @@ import { findUnresolvedRelativeImportsInFileMap } from '../utils/relative-import
 import { enrichPlanWithIntegrationEntryFiles } from '../utils/plan-integration-enrich.js';
 import { sanitizePhantomRouteTablesAgainstEntryTopology } from '../utils/routing-entry-topology.js';
 import { inferRouteEntryContextFromRequirementAndPlan } from '../utils/plan-route-context-infer.js';
+import { extractAndReadErrorFiles } from '../utils/error-file-extractor.js';
+import { Logger } from '../utils/logger.js';
+import { TokenBudgetManager } from '../utils/token-budget.js';
 /**
  * 核心调度引擎：状态机驱动的 Agent 调度循环
  * 支持多阶段暂停：plan-ready → 用户审批 → coding → diff-ready → 用户确认 → commit
@@ -26,8 +29,12 @@ import { inferRouteEntryContextFromRequirementAndPlan } from '../utils/plan-rout
 export class Orchestrator {
     deps;
     sandboxShouldCleanup = true;
+    logger;
+    tokenBudget;
     constructor(deps) {
         this.deps = deps;
+        this.logger = Logger.for('orchestrator');
+        this.tokenBudget = new TokenBudgetManager();
     }
     /**
      * 主循环：根据需求状态调度对应 Agent
@@ -125,6 +132,7 @@ export class Orchestrator {
                 // 必须在 yield 之前保存到 DB，因为 for-await break 会触发 generator.return() 跳过 yield 之后的代码
                 // 使用 waiting-for-pm 与「澄清进行中 clarifying」区分：前者才表示已有追问、等待 PM 回复
                 requirement.status = 'waiting-for-pm';
+                // NOTE: transition() 已集成到 phase handlers，此处保留兼容路径
                 requirement.structuredRequirement = clarificationResult.requirement;
                 await requirementMemory.saveRequirement(requirement);
                 this.sandboxShouldCleanup = false; // 暂停点，保留沙箱供后续 resume
@@ -202,6 +210,7 @@ export class Orchestrator {
                 return;
             }
             requirement.status = 'clarified';
+            // NOTE: transition() 已集成到 phase handlers，此处保留兼容路径
             await requirementMemory.saveRequirement(requirement);
             // 澄清完成，保存提示消息给用户
             await requirementMemory.addConversation({
@@ -360,6 +369,7 @@ export class Orchestrator {
             // 方案就绪 → 暂停，等用户审批
             requirement.plan = plan;
             requirement.status = 'plan-ready';
+            // NOTE: transition() 已集成到 phase handlers，此处保留兼容路径
             await requirementMemory.saveRequirement(requirement);
             this.sandboxShouldCleanup = false; // 暂停点，保留沙箱供后续 resume
             yield { type: 'plan-ready', plan, requirement, riskAssessment: assessment ?? undefined, naturalSummary: naturalSummary ?? undefined };
@@ -450,12 +460,27 @@ export class Orchestrator {
                     }
                     // 注入沙箱文件列表，防止 Agent 幻觉不存在的路径
                     try {
-                        const { execSync } = await import('child_process');
-                        const fileList = execSync('find . -type f \\( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" -o -name "*.json" \\) | grep -v node_modules | grep -v .git | sort', {
-                            cwd: sandbox.path,
-                            timeout: 5_000,
-                            encoding: 'utf-8',
-                        }).slice(0, 3000);
+                        const { readdir } = await import('fs/promises');
+                        const scanAllFiles = async (dir, prefix = '') => {
+                            const results = [];
+                            try {
+                                const entries = await readdir(dir, { withFileTypes: true });
+                                for (const e of entries) {
+                                    if (e.name.startsWith('.') || e.name === 'node_modules')
+                                        continue;
+                                    const rel = prefix ? `${prefix}/${e.name}` : e.name;
+                                    if (e.isDirectory()) {
+                                        results.push(...await scanAllFiles(join(dir, e.name), rel));
+                                    }
+                                    else if (/\.(jsx?|tsx|ts|json)$/.test(e.name)) {
+                                        results.push(rel);
+                                    }
+                                }
+                            }
+                            catch { }
+                            return results;
+                        };
+                        const fileList = (await scanAllFiles(sandbox.path)).sort().join('\n').slice(0, 3000);
                         sandboxFileListHint = `\n\n## ⚠️ 沙箱中实际存在的文件（import 路径必须指向这些文件）\n\`\`\`\n${fileList}\`\`\``;
                     }
                     catch { }
@@ -1196,11 +1221,15 @@ export class Orchestrator {
             // 测试阶段
             yield { type: 'status-change', status: 'testing', agent: 'test' };
             yield { type: 'executing', phase: `testing (attempt ${codeAttempt}/${MAX_RETRIES})`, progress: 70 };
+            // 提取本次变更的文件列表，用于限定测试范围（避免无关测试误报失败）
+            const changedFilesForTest = codeOutputs
+                .filter(f => f.path && f.content !== '__DELETE__')
+                .map(f => f.path);
             const testResult = await testRunner.run({
                 lint: commands.lint,
                 test: commands.test,
                 build: commands.build,
-            });
+            }, 3, changedFilesForTest);
             yield {
                 type: 'test-result',
                 passed: testResult.passed,
@@ -1219,44 +1248,66 @@ export class Orchestrator {
                 }
                 // ── 边界测试生成：分析变更代码，生成补充测试用例 ──
                 try {
-                    yield { type: 'executing', phase: 'generating boundary tests', progress: 75 };
-                    const changedFiles = codeOutputs.filter(f => f.path && f.content !== '__DELETE__').map(f => f.path).join(', ');
-                    const boundaryTestContext = `本次修改的文件：${changedFiles}\n\n` +
-                        `请分析这些文件中的函数，为未覆盖的边界条件生成测试用例。\n` +
-                        `项目测试命令：${commands.test}\n` +
-                        `已有测试文件：查看项目中已有的 .test.js 文件了解测试框架和 mock 模式。`;
-                    const boundaryTestResult = await this.deps.agentRunner.run(createBoundaryTestAgent(), {
-                        requirement: { ...requirement, pmInput: boundaryTestContext },
-                        projectContext,
-                        memory: await requirementMemory.getContext(requirement.id, projectContext),
-                    });
-                    if (boundaryTestResult.status === 'success') {
+                    const changedFilesList = codeOutputs.filter(f => f.path && f.content !== '__DELETE__').map(f => f.path);
+                    // 复杂度评估：简单 UI 组件 / 单文件修改不值得运行边界测试
+                    const totalLines = codeOutputs.reduce((sum, f) => sum + (f.content?.split('\n').length ?? 0), 0);
+                    const isSimpleChange = (changedFilesList.length <= 1 && totalLines < 50 ||
+                        changedFilesList.every(f => /\.(css|scss|less)$/.test(f)));
+                    if (isSimpleChange) {
+                        this.logger.info(`跳过边界测试：低复杂度变更 (files=${changedFilesList.length}, lines=${totalLines})`);
                         yield {
                             type: 'executing',
-                            phase: 'boundary tests generated, running...',
+                            phase: 'boundary tests skipped (simple change)',
                             progress: 78,
                         };
-                        // 运行完整测试套件（包含新生成的边界测试）
-                        const fullTestResult = await testRunner.run({
-                            lint: commands.lint,
-                            test: commands.test,
-                            build: commands.build,
+                    }
+                    else {
+                        yield { type: 'executing', phase: 'generating boundary tests', progress: 75 };
+                        const changedFiles = changedFilesList.join(', ');
+                        const boundaryTestContext = `本次修改的文件：${changedFiles}\n\n` +
+                            `请分析这些文件中的函数，为未覆盖的边界条件生成测试用例。\n` +
+                            `项目测试命令：${commands.test}\n` +
+                            `已有测试文件：查看项目中已有的 .test.js 文件了解测试框架和 mock 模式。`;
+                        // 推断测试框架（从 projectContext 或 package.json 特征判断）
+                        const testFramework = projectContext.thehand?.frontendFramework ? 'vitest' : 'jest';
+                        const boundaryTestResult = await this.deps.agentRunner.run(createBoundaryTestAgent({
+                            testCommand: commands.test,
+                            testFramework,
+                            changedFiles: changedFilesList,
+                        }), {
+                            requirement: { ...requirement, pmInput: boundaryTestContext },
+                            projectContext,
+                            memory: await requirementMemory.getContext(requirement.id, projectContext),
                         });
-                        yield {
-                            type: 'test-result',
-                            passed: fullTestResult.passed,
-                            details: JSON.stringify(fullTestResult, null, 2),
-                        };
-                        if (!fullTestResult.passed) {
-                            // 边界测试发现问题，记录但不阻断（边界测试是补充性的）
+                        if (boundaryTestResult.status === 'success') {
                             yield {
                                 type: 'executing',
-                                phase: 'boundary tests found issues (non-blocking)',
-                                progress: 80,
-                                warnings: [`边界测试未全部通过：${fullTestResult.steps.filter(s => !s.passed).map(s => s.name).join(', ')}`],
+                                phase: 'boundary tests generated, running...',
+                                progress: 78,
                             };
+                            // 运行完整测试套件（包含新生成的边界测试）
+                            // 注意：此处不传 changedFiles，因为边界测试后应跑全量回归验证
+                            const fullTestResult = await testRunner.run({
+                                lint: commands.lint,
+                                test: commands.test,
+                                build: commands.build,
+                            });
+                            yield {
+                                type: 'test-result',
+                                passed: fullTestResult.passed,
+                                details: JSON.stringify(fullTestResult, null, 2),
+                            };
+                            if (!fullTestResult.passed) {
+                                // 边界测试发现问题，记录但不阻断（边界测试是补充性的）
+                                yield {
+                                    type: 'executing',
+                                    phase: 'boundary tests found issues (non-blocking)',
+                                    progress: 80,
+                                    warnings: [`边界测试未全部通过：${fullTestResult.steps.filter(s => !s.passed).map(s => s.name).join(', ')}`],
+                                };
+                            }
                         }
-                    }
+                    } // end !isSimpleChange
                 }
                 catch (boundaryErr) {
                     // 边界测试生成失败不阻断主流程
@@ -1386,6 +1437,7 @@ export class Orchestrator {
             catch { }
         }
         requirement.status = 'diff-ready';
+        // NOTE: transition() 已集成到 phase handlers，此处保留兼容路径
         await requirementMemory.saveRequirement(requirement);
         this.sandboxShouldCleanup = false; // 暂停点，保留沙箱供后续 commit
         yield {
@@ -1442,6 +1494,7 @@ export class Orchestrator {
         }
         // 完成
         requirement.status = 'done';
+        // NOTE: transition() 已集成到 phase handlers，此处保留兼容路径
         await requirementMemory.saveRequirement(requirement);
         yield { type: 'completed', requirement };
     }
@@ -1595,75 +1648,5 @@ export class Orchestrator {
         };
         return mapping[status] ?? 'unknown';
     }
-}
-/**
- * 从构建/测试错误输出中提取涉及的源码文件路径，并读取其内容
- * 只提取项目源码文件，排除 node_modules、工具内部文件、堆栈帧
- * 返回 {path, content}[] 供 coding agent 作为上下文参考
- */
-async function extractAndReadErrorFiles(errorOutput, sandboxPath) {
-    const filePaths = new Set();
-    // 只匹配项目源码路径（src/ 或 app/ 开头），不匹配堆栈帧中的绝对路径
-    const patterns = [
-        // Vite/Rollup 错误行: "src/agent.js (2:9): "getToken" is not exported..."
-        /(?:^|\n)\s*((?:src|app|lib)\/[^\s(]+\.(?:js|jsx|ts|tsx|vue))\s*\(\d+:\d+\):/g,
-        // TypeScript 错误: src/foo.ts(10,5): error TS2322
-        /(?:^|\n)\s*((?:src|app|lib)\/[^\s(]+\.(?:js|jsx|ts|tsx|vue))\(\d+,\d+\):\s*error/g,
-        // ESLint 错误: src/foo.js:10:5: error
-        /(?:^|\n)\s*((?:src|app|lib)\/[^\s:]+\.(?:js|jsx|ts|tsx|vue)):\d+:\d+:\s*(?:error|warning)/g,
-        // file: 行中的项目源码路径（从 /sandbox/<workspace>/ 之后截取）
-        /file:\s*\/sandbox\/[^/]+\/((?:src|app|lib)\/[^\s:]+\.(?:js|jsx|ts|tsx|vue))/g,
-        // 错误信息中引用的文件: "xxx" is not exported by "src/context/AuthContext.jsx"
-        /(?:is not exported by|is not declared in|Cannot find module|Module not found)[^"']*["']((?:src|app|lib)\/[^"']+\.(?:js|jsx|ts|tsx|vue))["']/gi,
-        // 错误信息中引用的文件: imported by "src/agent.js"
-        /imported by\s+["']((?:src|app|lib)\/[^"']+\.(?:js|jsx|ts|tsx|vue))["']/gi,
-        // 绝对路径中的项目源码: /sandbox/frontend/src/context/AuthContext.jsx:46:9
-        /(?:^|\s)\/sandbox\/[^/]+\/((?:src|app|lib)\/[^\s:]+\.(?:js|jsx|ts|tsx|vue)):\d+/g,
-    ];
-    // 排除规则：node_modules、工具内部路径
-    const EXCLUDE_PATTERNS = [
-        /node_modules[\\/]/,
-        /rollup[\\/]dist[\\/]/,
-        /vite[\\/]dist[\\/]/,
-        /parseAst\.js$/,
-        /node-entry\.js$/,
-    ];
-    function isExcluded(path) {
-        return EXCLUDE_PATTERNS.some(p => p.test(path));
-    }
-    for (const pattern of patterns) {
-        let match;
-        while ((match = pattern.exec(errorOutput)) !== null) {
-            const filePath = match[1].replace(/^\//, '');
-            if (isExcluded(filePath))
-                continue;
-            // normalize：frontend/src/agent.js → src/agent.js
-            const normalized = filePath.replace(/^(?:frontend|backend)\//, '');
-            filePaths.add(normalized);
-        }
-    }
-    // 读取每个文件的内容
-    const { readFile } = await import('fs/promises');
-    const { join } = await import('path');
-    const results = [];
-    for (const filePath of filePaths) {
-        // 尝试多个可能的基础路径
-        const candidates = [
-            join(sandboxPath, 'frontend', filePath),
-            join(sandboxPath, 'backend', filePath),
-            join(sandboxPath, filePath),
-        ];
-        for (const fullPath of candidates) {
-            try {
-                const content = await readFile(fullPath, 'utf-8');
-                results.push({ path: filePath, content });
-                break;
-            }
-            catch {
-                // 文件不存在，尝试下一个候选路径
-            }
-        }
-    }
-    return results;
 }
 //# sourceMappingURL=orchestrator.js.map

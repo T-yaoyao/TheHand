@@ -11,13 +11,13 @@ export { DockerSandboxManager } from './git-ops/docker-sandbox.js'
 export type { DockerSandboxConfig } from './git-ops/docker-sandbox.js'
 export type { Sandbox } from './git-ops/sandbox.js'
 export type { SandboxManagerLike } from './orchestrator/orchestrator.js'
-export { TestRunner } from './git-ops/test-runner.js'
+export { TestRunner, computeTestScope, scopeTestCommand } from './git-ops/test-runner.js'
 export { RequirementMemory } from './memory/requirement-memory.js'
 export { ProjectMemory } from './memory/project-memory.js'
 export { createPlanAgent } from './agents/plan-agent.js'
 export { createCodingAgent, runCoding, runCodingBatch, extractInterfaceSummary } from './agents/coding-agent.js'
 export { extractFileInterfaces, buildBatches } from './agents/architect-agent.js'
-export { createTestAgent } from './agents/test-agent.js'
+export { createTestAgent, createBoundaryTestAgent } from './agents/test-agent.js'
 export { runClarification, CLARIFICATION_TOOLS } from './agents/clarification-agent.js'
 export { createFileReadTool } from './tools/file-read-tool.js'
 export { createFileWriteTool } from './tools/file-write-tool.js'
@@ -37,6 +37,19 @@ export {
   getDefaultProjectId,
   assertTheHandRequiredEnv,
 } from './config/thehand-paths.js'
+export { extractAndReadErrorFiles, extractErrorFilePaths } from './utils/error-file-extractor.js'
+
+// 重构新增模块
+export { transition, canTransition, isTerminal, isPausePoint, getValidNextStates, VALID_TRANSITIONS, StateTransitionError } from './orchestrator/state-machine.js'
+export type { PhaseHandler } from './orchestrator/phase-handler.js'
+export { BasePhaseHandler } from './orchestrator/phase-handler.js'
+export { TokenBudgetManager } from './utils/token-budget.js'
+export { Logger } from './utils/logger.js'
+export { ClarificationPhase } from './orchestrator/phases/clarification-phase.js'
+export { PlanningPhase } from './orchestrator/phases/planning-phase.js'
+export { CodingPhase } from './orchestrator/phases/coding-phase.js'
+export { TestingPhase } from './orchestrator/phases/testing-phase.js'
+export { CommitPhase } from './orchestrator/phases/commit-phase.js'
 
 export type {
   Requirement,
@@ -70,4 +83,9 @@ export type {
   TheHandRoutingIntegration,
   TheHandRecallL1,
   TheHandOrphanGuard,
+  PhaseContext,
+  TokenBudget,
+  SkillMatchRule,
+  LogLevel,
+  LogEntry,
 } from './types.js'

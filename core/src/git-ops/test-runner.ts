@@ -42,6 +42,50 @@ function extractMissingPackages(output: string): string[] {
 }
 
 /**
+ * 根据变更文件列表，计算测试范围路径（公共目录前缀）
+ * 用于将全量测试命令（npm test）缩减为仅测试变更相关目录
+ *
+ * 规则：
+ * - 所有文件在同一顶级目录（如 frontend/）→ 返回该目录
+ * - 跨多个顶级目录 → 返回 null（不限制，跑全量）
+ * - 根目录文件 → 返回 null
+ */
+export function computeTestScope(changedFiles: string[]): string | null {
+  if (!changedFiles.length) return null
+
+  const topLevelDirs = new Set<string>()
+  for (const f of changedFiles) {
+    const parts = f.replace(/\\/g, '/').split('/')
+    if (parts.length <= 1) return null  // 根目录文件，无法限定范围
+    topLevelDirs.add(parts[0])
+  }
+
+  // 所有变更在同一顶级目录 → 限定到该目录
+  if (topLevelDirs.size === 1) {
+    return [...topLevelDirs][0]
+  }
+
+  return null  // 跨多个顶级目录，跑全量
+}
+
+/**
+ * 为测试命令追加范围限定参数
+ * npm test → npm test -- <scope>
+ * vitest   → vitest <scope>
+ */
+export function scopeTestCommand(baseCommand: string, scope: string | null): string {
+  if (!scope) return baseCommand
+
+  const trimmed = baseCommand.trim()
+  // npm run test / npm test → 用 -- 传参给底层脚本
+  if (/^npm\s/.test(trimmed)) {
+    return `${trimmed} -- ${scope}`
+  }
+  // 直接调用 vitest/jest/mocha → 直接追加路径
+  return `${trimmed} ${scope}`
+}
+
+/**
  * 测试运行器：在沙箱中执行 lint 和单测
  * 不依赖 LLM，直接执行命令并解析结果
  */
@@ -54,10 +98,25 @@ export class TestRunner {
   /**
    * 执行完整的测试流程：lint → build（若配置）→ test → (失败时) 安装缺失依赖 / auto-fix → retry
    * lint 作为非阻塞检查（warnings 不阻断）；build 与 test 为阻塞检查
+   *
+   * @param commands       lint/test/build 命令
+   * @param maxFixAttempts 测试失败后最大重试次数
+   * @param changedFiles   本次修改的文件列表（用于限定测试范围，不传则跑全量）
    */
-  async run(commands: { lint: string; test: string; build?: string }, maxFixAttempts: number = 3): Promise<TestRunResult> {
+  async run(
+    commands: { lint: string; test: string; build?: string },
+    maxFixAttempts: number = 3,
+    changedFiles?: string[],
+  ): Promise<TestRunResult> {
     const steps: TestStepResult[] = []
     let fixAttempts = 0
+
+    // 计算测试范围：只跑变更文件所在目录的测试，避免无关测试误报失败
+    const scope = changedFiles ? computeTestScope(changedFiles) : null
+    const scopedTestCmd = scopeTestCommand(commands.test, scope)
+    if (scope) {
+      console.log(`[test-runner] 测试范围限定: ${scope} (变更文件 ${changedFiles!.length} 个)`)
+    }
 
     // Step 1: Lint（非阻塞，lint 失败不阻断流程）
     const lintResult = await this.executeStep('lint', commands.lint)
@@ -73,7 +132,7 @@ export class TestRunner {
     }
 
     // Step 3: Test（阻塞，test 必须通过）
-    const testResult = await this.executeStep('unit-test', commands.test)
+    const testResult = await this.executeStep('unit-test', scopedTestCmd)
     steps.push(testResult)
 
     // 如果 test 失败，尝试自动修复
@@ -95,7 +154,7 @@ export class TestRunner {
 
         if (installResult.passed) {
           console.log(`[test-runner] 缺失依赖安装成功，重新运行测试...`)
-          const retryAfterInstall = await this.executeStep('unit-test-after-deps-install', commands.test)
+          const retryAfterInstall = await this.executeStep('unit-test-after-deps-install', scopedTestCmd)
           steps.push(retryAfterInstall)
           if (retryAfterInstall.passed) {
             testResult.passed = true
@@ -117,8 +176,8 @@ export class TestRunner {
         }
       }
 
-      // 重新运行测试
-      const retryResult = await this.executeStep(`unit-test-retry (attempt ${fixAttempts})`, commands.test)
+      // 重新运行测试（保持范围限定）
+      const retryResult = await this.executeStep(`unit-test-retry (attempt ${fixAttempts})`, scopedTestCmd)
       if (retryResult.passed) {
         testResult.passed = true
         testResult.output += `\n[passed at attempt ${fixAttempts}]`

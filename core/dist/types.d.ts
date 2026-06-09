@@ -13,6 +13,7 @@ export interface Requirement {
     estimatedCost?: number;
     traceId?: string;
     autoApprove?: boolean;
+    clarificationRound?: number;
     createdAt: Date;
     updatedAt: Date;
 }
@@ -200,6 +201,19 @@ export interface TheHandProjectConfig {
     orphanGuard?: TheHandOrphanGuard;
     /** 追加到默认列表之后去重，供编码阶段读取关键上下文（须为沙箱内已存在的路径） */
     readContextCandidates?: string[];
+    /** 前端框架配置：组件扩展名、入口文件、关键目录，替代硬编码假设 */
+    frontendFramework?: {
+        /** 组件文件扩展名列表，如 ['.jsx', '.tsx', '.vue', '.svelte'] */
+        componentExtensions?: string[];
+        /** 应用入口文件候选列表，如 ['frontend/src/main.jsx', 'frontend/src/main.tsx'] */
+        entryCandidates?: string[];
+        /** 组件目录，如 'frontend/src/components' */
+        componentsDir?: string;
+        /** 路由/页面目录，如 'frontend/src/routes' */
+        routesDir?: string;
+        /** 上下文文件候选列表（追加到 readContextCandidates 之前） */
+        contextFileCandidates?: string[];
+    };
 }
 export interface ProjectCommands {
     lint: string;
@@ -268,6 +282,45 @@ export interface NaturalLanguageSummary {
     description: string;
     changes: string[];
     impact: string;
+}
+/** Phase 执行上下文：每个阶段需要的共享数据 */
+export interface PhaseContext {
+    requirement: Requirement;
+    projectId: string;
+    projectContext: ProjectContext;
+    sandbox: import('./git-ops/sandbox.js').Sandbox;
+    sandboxManager: import('./orchestrator/orchestrator.js').SandboxManagerLike;
+    requirementMemory: import('./memory/requirement-memory.js').RequirementMemory;
+    agentRunner: import('./agents/agent-runner.js').AgentRunner;
+    llmClient: import('./llm/llm-client.js').LLMClient;
+    promptManager: import('./llm/prompt-manager.js').PromptManager;
+    skillRegistry: import('./skill-registry/skill-registry.js').SkillRegistry;
+    projectMemory: import('./memory/project-memory.js').ProjectMemory;
+    testRunner: import('./git-ops/test-runner.js').TestRunner;
+    repoManager: import('./git-ops/repo-manager.js').RepoManager;
+    executor?: import('./git-ops/executor.js').CommandExecutor;
+}
+export interface TokenBudget {
+    maxTotal: number;
+    used: number;
+    remaining: number;
+}
+export interface SkillMatchRule {
+    type?: string | string[];
+    entity?: string | string[];
+    scope?: ('frontend' | 'backend' | 'fullstack') | ('frontend' | 'backend' | 'fullstack')[];
+    descriptionContains?: string | string[];
+    priority?: number;
+}
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+export interface LogEntry {
+    timestamp: string;
+    level: LogLevel;
+    module: string;
+    message: string;
+    data?: Record<string, unknown>;
+    traceId?: string;
+    requirementId?: string;
 }
 export interface DiffCheckResult {
     hasUnexpectedChanges: boolean;

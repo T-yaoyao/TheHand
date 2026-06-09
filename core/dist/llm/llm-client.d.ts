@@ -86,6 +86,16 @@ export declare class LLMClient {
         calls: number;
     };
     /**
+     * 获取指定时间之后的 Token 统计（用于单次 run 的精确成本计算）
+     * 解决单例 LLMClient 累积统计导致成本失真的问题
+     */
+    getStatsSince(since: Date): ReturnType<typeof this.getStats>;
+    /**
+     * 重置统计历史（谨慎使用，主要用于测试）
+     */
+    resetStats(): void;
+    private aggregateStats;
+    /**
      * 获取 Token 历史记录
      */
     getHistory(): TokenRecord[];

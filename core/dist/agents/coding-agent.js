@@ -457,11 +457,14 @@ async function getProjectTree(dirPath, maxDepth, currentDepth = 0, prefix = '') 
     return lines.join('\n');
 }
 /**
- * 读取关键上下文文件（可由 thehand.readContextCandidates 追加候选路径）
+ * 读取关键上下文文件（支持从 project.json 的 thehand.frontendFramework 配置读取）
+ * 优先级：project.json 配置 > 默认候选列表
  */
 async function readContextFiles(sandboxPath, projectContext) {
     const contextFiles = [];
-    const DEFAULT_CANDIDATES = [
+    // 从 project.json 读取框架配置，回退到默认值
+    const fwConfig = projectContext?.thehand?.frontendFramework;
+    const DEFAULT_CANDIDATES = fwConfig?.contextFileCandidates ?? [
         'frontend/src/main.jsx',
         'frontend/src/main.tsx',
         'frontend/src/router.jsx',

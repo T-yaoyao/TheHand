@@ -1,73 +1,116 @@
 /**
- * 结构化日志模块
- * 统一的日志接口，支持级别控制和结构化输出
+ * 结构化日志系统
+ *
+ * 替代散落的 console.log/console.warn，提供：
+ * 1. 统一日志格式（JSON 结构化）
+ * 2. 日志级别控制
+ * 3. 模块标签
+ * 4. 可选 traceId / requirementId 关联
  */
-const LOG_LEVEL_PRIORITY = {
-    debug: 0,
-    info: 1,
-    warn: 2,
-    error: 3,
-};
-function getEnvLogLevel() {
-    const env = (process.env.LOG_LEVEL ?? 'info').toLowerCase();
-    if (env in LOG_LEVEL_PRIORITY)
-        return env;
-    return 'info';
-}
-const globalLevel = getEnvLogLevel();
-function shouldLog(level) {
-    return LOG_LEVEL_PRIORITY[level] >= LOG_LEVEL_PRIORITY[globalLevel];
-}
-function formatTimestamp() {
-    return new Date().toISOString();
-}
-function formatEntry(entry) {
-    const { timestamp, level, module, message, data } = entry;
-    const prefix = `${timestamp} [${level.toUpperCase()}] [${module}] ${message}`;
-    if (data !== undefined) {
-        const serialized = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
-        return `${prefix}\n${serialized}`;
-    }
-    return prefix;
-}
 export class Logger {
+    static globalLevel = 'info';
+    static instances = new Map();
     module;
+    traceId;
+    requirementId;
     constructor(module) {
         this.module = module;
     }
+    /**
+     * 获取或创建指定模块的 Logger 实例
+     */
+    static for(module) {
+        let instance = Logger.instances.get(module);
+        if (!instance) {
+            instance = new Logger(module);
+            Logger.instances.set(module, instance);
+        }
+        return instance;
+    }
+    /**
+     * 设置全局日志级别
+     */
+    static setLevel(level) {
+        Logger.globalLevel = level;
+    }
+    /**
+     * 获取当前全局日志级别
+     */
+    static getLevel() {
+        return Logger.globalLevel;
+    }
+    /**
+     * 创建带 trace 上下文信息的子 logger
+     */
+    withContext(traceId, requirementId) {
+        const child = new Logger(this.module);
+        child.traceId = traceId;
+        child.requirementId = requirementId;
+        return child;
+    }
     debug(message, data) {
-        if (!shouldLog('debug'))
-            return;
-        const entry = { timestamp: formatTimestamp(), level: 'debug', module: this.module, message, data };
-        console.debug(formatEntry(entry));
+        this.log('debug', message, data);
     }
     info(message, data) {
-        if (!shouldLog('info'))
-            return;
-        const entry = { timestamp: formatTimestamp(), level: 'info', module: this.module, message, data };
-        console.info(formatEntry(entry));
+        this.log('info', message, data);
     }
     warn(message, data) {
-        if (!shouldLog('warn'))
-            return;
-        const entry = { timestamp: formatTimestamp(), level: 'warn', module: this.module, message, data };
-        console.warn(formatEntry(entry));
+        this.log('warn', message, data);
     }
     error(message, data) {
-        if (!shouldLog('error'))
+        this.log('error', message, data);
+    }
+    log(level, message, data) {
+        if (!this.shouldLog(level))
             return;
-        const entry = { timestamp: formatTimestamp(), level: 'error', module: this.module, message, data };
-        console.error(formatEntry(entry));
+        const entry = {
+            timestamp: new Date().toISOString(),
+            level,
+            module: this.module,
+            message,
+            data,
+            traceId: this.traceId,
+            requirementId: this.requirementId,
+        };
+        const formatted = this.format(entry);
+        switch (level) {
+            case 'error':
+                console.error(formatted);
+                break;
+            case 'warn':
+                console.warn(formatted);
+                break;
+            case 'debug':
+                console.debug(formatted);
+                break;
+            default:
+                console.log(formatted);
+        }
     }
-    /** 创建子模块 logger */
-    child(subModule) {
-        return new Logger(`${this.module}:${subModule}`);
+    shouldLog(level) {
+        const levels = ['debug', 'info', 'warn', 'error'];
+        return levels.indexOf(level) >= levels.indexOf(Logger.globalLevel);
+    }
+    format(entry) {
+        const parts = [`[${entry.module}]`];
+        if (entry.traceId) {
+            parts.push(`[trace:${entry.traceId.slice(0, 12)}]`);
+        }
+        if (entry.requirementId) {
+            parts.push(`[req:${entry.requirementId.slice(0, 8)}]`);
+        }
+        parts.push(entry.message);
+        if (entry.data && Object.keys(entry.data).length > 0) {
+            parts.push(JSON.stringify(entry.data));
+        }
+        return parts.join(' ');
     }
 }
-/** 创建模块 logger 的工厂函数 */
+/**
+ * 工厂函数，兼容旧代码中 createLogger(moduleName) 的用法
+ * 等价于 Logger.for(moduleName)
+ */
 export function createLogger(module) {
-    return new Logger(module);
+    return Logger.for(module);
 }
-/** 全局默认 logger */
-export const logger = createLogger('thehand');
 //# sourceMappingURL=logger.js.map

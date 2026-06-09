@@ -1,12 +1,20 @@
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
 import { CODING_TOOLS } from '../agents/coding-agent.js';
+import { Logger } from '../utils/logger.js';
+const log = Logger.for('skill-registry');
 /**
  * Skill 注册与发现机制
  * 对标 Claude Code 的 getSkillDirCommands() + createSkillCommand()
+ *
+ * 支持两种匹配模式：
+ * 1. 声明式 SkillMatchRule（推荐）：多维匹配 + 优先级排序
+ * 2. 传统 canHandle 函数（向后兼容）
  */
 export class SkillRegistry {
     skills = new Map();
+    /** 声明式匹配规则（优先级高于 canHandle） */
+    matchRules = new Map();
     llmClient = null;
     /**
      * 注入 LLM 客户端，使 skill 执行成为可能
@@ -37,21 +45,92 @@ export class SkillRegistry {
         }
     }
     /**
-     * 手动注册 Skill
+     * 注册 Skill（支持声明式匹配规则）
      */
-    register(skill) {
+    register(skill, matchRule) {
         this.skills.set(skill.name, skill);
+        if (matchRule) {
+            this.matchRules.set(skill.name, matchRule);
+        }
+    }
+    /**
+     * 注销 Skill
+     */
+    unregister(name) {
+        this.matchRules.delete(name);
+        return this.skills.delete(name);
     }
     /**
      * 根据需求匹配 Skill
+     * 优先使用声明式匹配规则（多维 + 优先级排序），回退到 canHandle 函数
      */
     match(requirement) {
+        // 1. 声明式匹配：收集所有匹配的 skill 并按优先级排序
+        const declarativeMatches = [];
+        for (const [name, rule] of this.matchRules) {
+            const score = this.evaluateMatchRule(rule, requirement);
+            if (score > 0) {
+                declarativeMatches.push({ name, score, priority: rule.priority ?? 0 });
+            }
+        }
+        if (declarativeMatches.length > 0) {
+            // 按优先级排序（高到低），再按分数排序（高到低）
+            declarativeMatches.sort((a, b) => b.priority - a.priority || b.score - a.score);
+            const best = declarativeMatches[0];
+            const skill = this.skills.get(best.name);
+            if (skill) {
+                log.debug('声明式匹配命中', { skill: best.name, score: best.score, priority: best.priority });
+                return skill;
+            }
+        }
+        // 2. 回退：传统 canHandle 匹配（向后兼容）
         for (const skill of this.skills.values()) {
             if (skill.canHandle(requirement)) {
                 return skill;
             }
         }
         return null;
+    }
+    /**
+     * 评估声明式匹配规则的得分
+     * 返回 0 表示不匹配，>0 表示匹配度
+     */
+    evaluateMatchRule(rule, req) {
+        let score = 0;
+        // type 匹配
+        if (rule.type) {
+            const types = Array.isArray(rule.type) ? rule.type : [rule.type];
+            if (types.includes(req.type))
+                score += 10;
+            else
+                return 0; // type 不匹配直接排除
+        }
+        // entity 匹配
+        if (rule.entity) {
+            const entities = Array.isArray(rule.entity) ? rule.entity : [rule.entity];
+            if (entities.includes(req.entity))
+                score += 5;
+            else
+                return 0;
+        }
+        // scope 匹配
+        if (rule.scope) {
+            const scopes = Array.isArray(rule.scope) ? rule.scope : [rule.scope];
+            if (scopes.includes(req.scope))
+                score += 3;
+            else
+                return 0;
+        }
+        // description 关键词匹配
+        if (rule.descriptionContains) {
+            const keywords = Array.isArray(rule.descriptionContains) ? rule.descriptionContains : [rule.descriptionContains];
+            const descLower = req.description.toLowerCase();
+            for (const kw of keywords) {
+                if (descLower.includes(kw.toLowerCase()))
+                    score += 1;
+            }
+        }
+        return score;
     }
     /**
      * 获取所有已注册的 Skill
@@ -198,11 +277,17 @@ ${prompt}
         return { frontmatter, body: match[2] };
     }
     /**
-     * 构建 canHandle 函数
+     * 构建 canHandle 函数（向后兼容，新代码应使用声明式 SkillMatchRule）
      */
     buildCanHandle(expression) {
         if (!expression)
             return () => false;
+        // 尝试解析为声明式规则
+        const rule = this.tryParseAsMatchRule(expression);
+        if (rule) {
+            return (req) => this.evaluateMatchRule(rule, req) > 0;
+        }
+        // 回退：旧式正则匹配
         const match = expression.match(/(?:requirement|req)\.type\s*={2,3}\s*['"](\w+)['"]/);
         if (match) {
             return (req) => req.type === match[1];
@@ -214,6 +299,34 @@ ${prompt}
             }
         }
         return () => false;
+    }
+    /**
+     * 尝试将 SKILL.md 中的 canHandle 字符串解析为声明式规则
+     * 支持格式："type:add_field,add_page scope:frontend"
+     */
+    tryParseAsMatchRule(expression) {
+        const rule = {};
+        let hasAny = false;
+        // type:xxx,yyy
+        const typeMatch = expression.match(/type:\s*([\w,]+)/);
+        if (typeMatch) {
+            rule.type = typeMatch[1].split(',').map(s => s.trim());
+            hasAny = true;
+        }
+        // entity:xxx,yyy
+        const entityMatch = expression.match(/entity:\s*([\w,]+)/);
+        if (entityMatch) {
+            rule.entity = entityMatch[1].split(',').map(s => s.trim());
+            hasAny = true;
+        }
+        // scope:frontend,backend
+        const scopeMatch = expression.match(/scope:\s*([\w,]+)/);
+        if (scopeMatch) {
+            const scopes = scopeMatch[1].split(',').map(s => s.trim());
+            rule.scope = scopes;
+            hasAny = true;
+        }
+        return hasAny ? rule : null;
     }
 }
 //# sourceMappingURL=skill-registry.js.map

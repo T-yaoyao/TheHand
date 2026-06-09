@@ -18,7 +18,7 @@ import {
 import type { OrchestratorEvent } from '@thehand/core'
 import { DbRequirementMemory, loadRequirementFromDb } from './db-requirement-memory.js'
 import { execute, queryOne } from './db.js'
-import { pushEvent } from './routes/events.js'
+import { pushEvent, cleanupRequirement } from './routes/events.js'
 import { log } from './logger.js'
 
 const repoRoot = resolve(process.cwd(), '..')
@@ -101,6 +101,7 @@ export async function runOrchestratorForRequirement(
 
   runningJobs.add(requirementId)
   const startedAt = Date.now()
+  const startedAtDate = new Date()  // 用于 getStatsSince 精确计算本次 run 的 token 消耗
   const previousStatus = requirement.status
 
   // ── 重跑时重置状态：failed/done → clarifying ──
@@ -144,7 +145,7 @@ export async function runOrchestratorForRequirement(
       }
     }
 
-    const stats = llmClient.getStats()
+    const stats = llmClient.getStatsSince(startedAtDate)  // 只统计本次 run 的 token，修复累积泄漏
     log.info(
       `[orchestrator] 结束 id=${requirementId.slice(0, 8)}… events=${eventCount} ` +
         `耗时=${((Date.now() - startedAt) / 1000).toFixed(1)}s ` +
@@ -166,6 +167,8 @@ export async function runOrchestratorForRequirement(
     log.error(`[orchestrator] 异常 id=${requirementId.slice(0, 8)}…`, message)
   } finally {
     runningJobs.delete(requirementId)
+    // 终态后清理 SSE 连接释放内存
+    cleanupRequirement(requirementId)
   }
 }
 
@@ -199,10 +202,20 @@ function logOrchestratorEvent(requirementId: string, event: OrchestratorEvent): 
 }
 
 function serializeEvent(event: OrchestratorEvent, requirementId: string): Record<string, unknown> {
-  return JSON.parse(
-    JSON.stringify(event, (_key, value) => {
-      if (value instanceof Date) return value.toISOString()
-      return value
-    }),
-  ) as Record<string, unknown>
+  try {
+    return JSON.parse(
+      JSON.stringify(event, (_key, value) => {
+        if (value instanceof Date) return value.toISOString()
+        return value
+      }),
+    ) as Record<string, unknown>
+  } catch {
+    // 回退方案：手动序列化，避免循环引用崩溃
+    log.warn(`[serializeEvent] JSON序列化失败 requirement=${requirementId.slice(0, 8)}，使用降级策略`)
+    return {
+      type: (event as any).type ?? 'unknown',
+      requirementId,
+      _serializeError: true,
+    }
+  }
 }
