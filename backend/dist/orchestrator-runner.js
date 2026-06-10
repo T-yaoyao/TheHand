@@ -53,7 +53,7 @@ async function getDeps() {
                 projectMemory,
                 requirementMemory,
             });
-            return { orchestrator, llmClient };
+            return { orchestrator, llmClient, sandboxManager };
         })();
     }
     return depsPromise;
@@ -80,10 +80,21 @@ export async function runOrchestratorForRequirement(requirementId, projectId = g
     const startedAtDate = new Date(); // 用于 getStatsSince 精确计算本次 run 的 token 消耗
     const previousStatus = requirement.status;
     // ── 重跑时重置状态：failed/done → clarifying ──
+    // 特例：如果沙箱仍然存活（commit 失败后保留），则恢复到 diff-ready 允许重试
     if (previousStatus === 'failed' || previousStatus === 'done') {
-        requirement.status = 'clarifying';
-        execute(`UPDATE requirements SET status = 'clarifying', updated_at = datetime('now') WHERE id = ?`, [requirementId]);
-        log.info(`[orchestrator] 重置状态: failed/done → clarifying`);
+        const { sandboxManager } = await getDeps();
+        const hasExistingSandbox = sandboxManager.getExisting(requirementId) != null;
+        if (hasExistingSandbox && previousStatus === 'failed') {
+            // 沙箱还在（commit 失败后保留的）→ 恢复到 diff-ready 允许重试提交
+            requirement.status = 'diff-ready';
+            execute(`UPDATE requirements SET status = 'diff-ready', updated_at = datetime('now') WHERE id = ?`, [requirementId]);
+            log.info(`[orchestrator] 恢复状态: failed → diff-ready（沙箱存活，允许重试 commit）`);
+        }
+        else {
+            requirement.status = 'clarifying';
+            execute(`UPDATE requirements SET status = 'clarifying', updated_at = datetime('now') WHERE id = ?`, [requirementId]);
+            log.info(`[orchestrator] 重置状态: failed/done → clarifying`);
+        }
     }
     log.info(`[orchestrator] 开始 id=${requirementId.slice(0, 8)}… project=${projectId}`);
     log.info(`[orchestrator] PM: ${requirement.pmInput.slice(0, 80)}${requirement.pmInput.length > 80 ? '…' : ''}`);

@@ -278,17 +278,39 @@ requirementsRouter.post('/:id/commit', async (req, res) => {
 /**
  * POST /api/requirements/:id/submit-pr — 提交完成后：选择是否创建指向 main 的 GitHub PR
  * Body: { "create": true | false }
+ *
+ * 防御机制：
+ * - 如果 orchestrator 仍在运行（commit 中），等待最多 30 秒
+ * - 如果状态为 diff-ready（commit 失败），提示用户先重试提交
  */
-requirementsRouter.post('/:id/submit-pr', (req, res) => {
+requirementsRouter.post('/:id/submit-pr', async (req, res) => {
     const id = req.params.id;
     const create = req.body?.create === true;
+    // 如果 orchestrator 还在运行（commit 阶段），等待完成
+    const MAX_WAIT_MS = 30_000;
+    const POLL_INTERVAL_MS = 1_000;
+    const waitedUntil = Date.now() + MAX_WAIT_MS;
+    while (isOrchestratorRunning(id) && Date.now() < waitedUntil) {
+        await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    }
     const requirement = queryOne('SELECT * FROM requirements WHERE id = ?', [id]);
     if (!requirement) {
         res.status(404).json({ error: '需求不存在' });
         return;
     }
     if (requirement.status !== 'done') {
-        res.status(400).json({ error: `当前状态 ${requirement.status} 不可操作 PR（需已完成提交）` });
+        // 给出更具体的错误提示
+        let hint = '';
+        if (requirement.status === 'diff-ready') {
+            hint = '代码提交尚未完成（或提交失败）。请先点击“确认提交”完成提交后再操作 PR。';
+        }
+        else if (isOrchestratorRunning(id)) {
+            hint = '提交操作仍在进行中，请稍候再试。';
+        }
+        else {
+            hint = `当前状态 ${requirement.status} 不可操作 PR（需已完成提交）`;
+        }
+        res.status(400).json({ error: hint });
         return;
     }
     if (requirement.pr_url) {

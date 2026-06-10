@@ -37,8 +37,10 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
-  /** 等待 commit 完成的 requirement id（commit 后通过 SSE completed 事件触发 PR 对话框） */
+  /** 等待 commit 完成的 requirement id（须在 commit 请求发出前设置，供 SSE / HTTP 兜底共用） */
   const pendingCommitPrRef = useRef<string | null>(null)
+  /** 避免 SSE 与 HTTP 兜底重复弹出 PR 对话框 */
+  const prDialogTriggeredForRef = useRef<string | null>(null)
   const selectedRef = useRef<Requirement | null>(null)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout>>()
   const suppressAutoPlanTabRef = useRef(false)
@@ -124,6 +126,35 @@ export function App() {
     toastTimerRef.current = setTimeout(() => setToast(null), 4000)
   }, [])
 
+  const triggerPostCommitPrDialog = useCallback((rid: string) => {
+    if (prDialogTriggeredForRef.current === rid) return
+    prDialogTriggeredForRef.current = rid
+    pendingCommitPrRef.current = null
+    setSelected((prev) => (prev && prev.id === rid ? { ...prev, status: 'done' } : prev))
+    setRequirements((prev) => prev.map((r) => (r.id === rid ? { ...r, status: 'done' } : r)))
+    setDiffData(null)
+    setThinking(false)
+    setPostCommitPrDialogId(rid)
+    showToast('success', '代码已提交并应用到源仓库')
+  }, [showToast])
+
+  /** commit API 为同步等待；若 SSE completed 在 HTTP 返回前已送达但被错过，用接口状态兜底弹窗 */
+  const tryShowPostCommitPrDialogAfterCommit = useCallback(async (rid: string) => {
+    if (pendingCommitPrRef.current !== rid) return
+    try {
+      const req = await api.getRequirement(rid)
+      if (req.status === 'done' && !req.pr_url && req.pr_skipped !== 1) {
+        triggerPostCommitPrDialog(rid)
+      } else {
+        pendingCommitPrRef.current = null
+        setThinking(false)
+      }
+    } catch {
+      pendingCommitPrRef.current = null
+      setThinking(false)
+    }
+  }, [triggerPostCommitPrDialog])
+
   useEffect(() => {
     return () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current) }
   }, [])
@@ -171,7 +202,26 @@ export function App() {
   }, [conversations, tab, thinking])
 
   useEffect(() => {
-    if (!latestEvent || !selected) return
+    if (!latestEvent) return
+
+    if (latestEvent.type === 'completed' || latestEvent.type === 'failed') {
+      refreshList()
+      setThinking(false)
+      setPendingApproval(false)
+      setTab('progress')
+
+      if (pendingCommitPrRef.current) {
+        const rid = pendingCommitPrRef.current
+        if (latestEvent.type === 'completed') {
+          triggerPostCommitPrDialog(rid)
+        } else {
+          pendingCommitPrRef.current = null
+          showToast('error', latestEvent.error || '提交失败，沙箱已保留，您可以排查问题后重试')
+        }
+      }
+    }
+
+    if (!selected) return
     if (latestEvent.type === 'orchestrator-started') {
       suppressAutoPlanTabRef.current = false
       setPendingApproval(false)
@@ -210,27 +260,7 @@ export function App() {
         setThinking(false)
       }
     }
-    if (latestEvent.type === 'completed' || latestEvent.type === 'failed') {
-      refreshList()
-      setThinking(false)
-      setPendingApproval(false)
-      setTab('progress')
-
-      // commit 完成后显示 PR 对话框（通过 SSE 事件触发，而非乐观更新）
-      if (latestEvent.type === 'completed' && pendingCommitPrRef.current) {
-        const rid = pendingCommitPrRef.current
-        pendingCommitPrRef.current = null
-        setSelected(prev => prev && prev.id === rid ? { ...prev, status: 'done' } : prev)
-        setRequirements(prev => prev.map(r => r.id === rid ? { ...r, status: 'done' } : r))
-        setDiffData(null)
-        setPostCommitPrDialogId(rid)
-        showToast('success', '代码已提交并应用到源仓库')
-      } else if (latestEvent.type === 'failed' && pendingCommitPrRef.current) {
-        pendingCommitPrRef.current = null
-        showToast('error', latestEvent.error || '提交失败，沙箱已保留，您可以排查问题后重试')
-      }
-    }
-  }, [latestEvent, selected?.id, refreshList])
+  }, [latestEvent, selected?.id, refreshList, triggerPostCommitPrDialog, showToast])
 
   const handleCreate = async () => {
     if (!newInput.trim()) return
@@ -616,14 +646,15 @@ export function App() {
                           setThinking(true)
                           const rid = selected.id
                           try {
-                            await api.commitChanges(rid)
-                            // 不乐观更新 status，等待 SSE completed/failed 事件触发 PR 对话框
+                            // 须在 await 之前设置：commit API 同步等待编排结束，completed SSE 会在 HTTP 返回前发出
+                            prDialogTriggeredForRef.current = null
                             pendingCommitPrRef.current = rid
+                            await api.commitChanges(rid)
+                            await tryShowPostCommitPrDialogAfterCommit(rid)
                             setDiffData(null)
-                            showToast('success', '提交中，等待完成...')
-                            reconnect()
                             setTab('progress')
                           } catch (e: unknown) {
+                            pendingCommitPrRef.current = null
                             showToast('error', e instanceof Error ? e.message : '提交失败')
                             setThinking(false)
                           } finally {

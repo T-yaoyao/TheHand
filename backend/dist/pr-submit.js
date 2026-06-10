@@ -1,12 +1,32 @@
 import { execFileSync } from 'child_process';
 import { writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
+/** 优先使用 .env 中的 GITHUB_TOKEN；否则回退到 gh auth login 的凭据 */
+function resolveGitHubToken() {
+    const t = process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim();
+    return t || undefined;
+}
+function childEnv() {
+    const env = { ...process.env };
+    const token = resolveGitHubToken();
+    if (token) {
+        env.GH_TOKEN = token;
+        env.GITHUB_TOKEN = token;
+    }
+    return env;
+}
 function git(cwd, args, timeout = 120_000) {
-    return execFileSync('git', args, {
+    const token = resolveGitHubToken();
+    const gitArgs = token
+        ? ['-c', `http.extraHeader=AUTHORIZATION: bearer ${token}`, ...args]
+        : args;
+    return execFileSync('git', gitArgs, {
         cwd,
         encoding: 'utf-8',
         timeout,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        // credential helper（gh auth git-credential）需要 stdin
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: childEnv(),
         maxBuffer: 20 * 1024 * 1024,
     }).trim();
 }
@@ -15,13 +35,15 @@ function gh(cwd, args, timeout = 180_000) {
         cwd,
         encoding: 'utf-8',
         timeout,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: childEnv(),
         maxBuffer: 20 * 1024 * 1024,
     }).trim();
 }
 const PROTECTED_BRANCHES = new Set(['main', 'master']);
 /**
- * 将当前仓库的已提交变更推送到 origin，并对 main 发起 PR（需已安装 gh 且已认证）。
+ * 将当前仓库的已提交变更推送到 origin，并对 main 发起 PR。
+ * 认证：优先 `GITHUB_TOKEN`（根目录 .env）；否则依赖 `gh auth login` + `gh auth setup-git`。
  */
 export function pushBranchAndCreatePrToMain(options) {
     const { cwd, requirementId, pmInput } = options;
