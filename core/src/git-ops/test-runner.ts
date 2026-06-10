@@ -15,6 +15,14 @@ export interface TestRunResult {
 }
 
 /**
+ * 检测测试输出是否为“无匹配测试文件”
+ * vitest/jest 在无匹配时会 exit code 1，但这不是真正的测试失败
+ */
+export function isNoTestFilesFound(output: string): boolean {
+  return /No test files found/i.test(output)
+}
+
+/**
  * 从命令输出中提取缺失的包名
  * 匹配: Cannot find package 'xxx', Cannot find module 'xxx', Cannot find module "xxx"
  */
@@ -46,26 +54,53 @@ function extractMissingPackages(output: string): string[] {
  * 用于将全量测试命令（npm test）缩减为仅测试变更相关目录
  *
  * 规则：
- * - 所有文件在同一顶级目录（如 frontend/）→ 返回该目录
- * - 跨多个顶级目录 → 返回 null（不限制，跑全量）
+ * - 计算所有变更文件的最长公共目录前缀
+ * - 上移一级（parent dir），确保兄弟目录的测试文件也被覆盖
+ * - 单文件直接取所在目录
+ * - 无公共前缀（跨多个顶级目录）→ 返回 null（跑全量）
  * - 根目录文件 → 返回 null
  */
 export function computeTestScope(changedFiles: string[]): string | null {
   if (!changedFiles.length) return null
 
-  const topLevelDirs = new Set<string>()
-  for (const f of changedFiles) {
-    const parts = f.replace(/\\/g, '/').split('/')
-    if (parts.length <= 1) return null  // 根目录文件，无法限定范围
-    topLevelDirs.add(parts[0])
+  const normalized = changedFiles.map(f => f.replace(/\\/g, '/'))
+
+  // 提取每个文件的目录部分
+  const dirs = normalized.map(f => {
+    const parts = f.split('/')
+    parts.pop() // 移除文件名
+    return parts
+  })
+
+  // 根目录文件 → 无法限定范围
+  if (dirs.some(d => d.length === 0)) return null
+
+  // 单文件：直接返回所在目录
+  if (dirs.length === 1) {
+    return dirs[0].join('/') || null
   }
 
-  // 所有变更在同一顶级目录 → 限定到该目录
-  if (topLevelDirs.size === 1) {
-    return [...topLevelDirs][0]
+  // 多文件：计算最长公共目录前缀
+  const commonSegments: string[] = []
+  for (let i = 0; i < dirs[0].length; i++) {
+    const seg = dirs[0][i]
+    if (dirs.every(d => d[i] === seg)) {
+      commonSegments.push(seg)
+    } else {
+      break
+    }
   }
 
-  return null  // 跨多个顶级目录，跑全量
+  // 无公共前缀（如 frontend/ vs backend/）→ 跑全量
+  if (commonSegments.length === 0) return null
+
+  // 上移一级，覆盖兄弟目录的测试文件
+  // 例如：公共前缀 frontend/src/routes/Article → 返回 frontend/src/routes
+  if (commonSegments.length >= 2) {
+    commonSegments.pop()
+  }
+
+  return commonSegments.join('/') || null
 }
 
 /**
@@ -111,12 +146,9 @@ export class TestRunner {
     const steps: TestStepResult[] = []
     let fixAttempts = 0
 
-    // 计算测试范围：只跑变更文件所在目录的测试，避免无关测试误报失败
-    const scope = changedFiles ? computeTestScope(changedFiles) : null
-    const scopedTestCmd = scopeTestCommand(commands.test, scope)
-    if (scope) {
-      console.log(`[test-runner] 测试范围限定: ${scope} (变更文件 ${changedFiles!.length} 个)`)
-    }
+    // 始终跑全量测试，不做范围限定（避免 scope 目录无测试文件等边界问题）
+    const scope = null
+    const scopedTestCmd = commands.test
 
     // Step 1: Lint（非阻塞，lint 失败不阻断流程）
     const lintResult = await this.executeStep('lint', commands.lint)
@@ -134,6 +166,29 @@ export class TestRunner {
     // Step 3: Test（阻塞，test 必须通过）
     const testResult = await this.executeStep('unit-test', scopedTestCmd)
     steps.push(testResult)
+
+    // 记录是否因 scope 无测试文件而回退，后续重试统一用全量命令
+    let fellBackToFullSuite = false
+
+    // 特殊处理：范围限定时无测试文件 → 回退到全量测试
+    // vitest/jest 对无匹配测试文件会 exit code 1，但这不是真正的测试失败
+    // 回退到全量确保基本回归验证，而不是直接跳过
+    if (!testResult.passed && scope && isNoTestFilesFound(testResult.output)) {
+      fellBackToFullSuite = true
+      console.log(`[test-runner] 范围限定目录 ${scope} 无测试文件，回退到全量测试`)
+      const fallbackResult = await this.executeStep('unit-test-fallback (full suite)', commands.test)
+      steps.push(fallbackResult)
+      testResult.passed = fallbackResult.passed
+      testResult.output += `\n[scoped directory '${scope}' had no test files, fell back to full suite]`
+      if (fallbackResult.passed) {
+        testResult.output += '\n[full suite passed]'
+      } else {
+        testResult.output += `\n[full suite failed]\n${fallbackResult.output}`
+      }
+    }
+
+    // 确定重试用哪个测试命令：如果 scope 无测试文件，后续统一用全量命令
+    const effectiveTestCmd = fellBackToFullSuite ? commands.test : scopedTestCmd
 
     // 如果 test 失败，尝试自动修复
     while (!testResult.passed) {
@@ -154,7 +209,7 @@ export class TestRunner {
 
         if (installResult.passed) {
           console.log(`[test-runner] 缺失依赖安装成功，重新运行测试...`)
-          const retryAfterInstall = await this.executeStep('unit-test-after-deps-install', scopedTestCmd)
+          const retryAfterInstall = await this.executeStep('unit-test-after-deps-install', effectiveTestCmd)
           steps.push(retryAfterInstall)
           if (retryAfterInstall.passed) {
             testResult.passed = true
@@ -176,8 +231,8 @@ export class TestRunner {
         }
       }
 
-      // 重新运行测试（保持范围限定）
-      const retryResult = await this.executeStep(`unit-test-retry (attempt ${fixAttempts})`, scopedTestCmd)
+      // 重新运行测试（scope 无测试文件时用全量命令）
+      const retryResult = await this.executeStep(`unit-test-retry (attempt ${fixAttempts})`, effectiveTestCmd)
       if (retryResult.passed) {
         testResult.passed = true
         testResult.output += `\n[passed at attempt ${fixAttempts}]`

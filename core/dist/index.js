@@ -8,7 +8,7 @@ export { PromptManager } from './llm/prompt-manager.js';
 export { RepoManager } from './git-ops/repo-manager.js';
 export { SandboxManager } from './git-ops/sandbox.js';
 export { DockerSandboxManager } from './git-ops/docker-sandbox.js';
-export { TestRunner } from './git-ops/test-runner.js';
+export { TestRunner, computeTestScope, scopeTestCommand, isNoTestFilesFound } from './git-ops/test-runner.js';
 export { RequirementMemory } from './memory/requirement-memory.js';
 export { ProjectMemory } from './memory/project-memory.js';
 export { createPlanAgent } from './agents/plan-agent.js';

@@ -5,8 +5,12 @@ export interface ClarificationResult {
     requirement: StructuredRequirement;
     needsMoreInfo: boolean;
     questions: string[] | null;
+    /** 模型显式列出的歧义/缺口（追问前展示，便于 PM 理解「为何要问」） */
+    detectedAmbiguities?: string[] | null;
     round: number;
 }
+/** 将歧义摘要与追问合并为对话气泡（首条为歧义，其后为具体问题） */
+export declare function expandClarificationQuestions(questions: string[], ambiguities?: string[] | null): string[];
 /**
  * 澄清 Agent Function Calling 工具定义
  */

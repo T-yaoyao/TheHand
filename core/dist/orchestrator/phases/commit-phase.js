@@ -18,9 +18,10 @@ export class CommitPhase extends BasePhaseHandler {
         const reqMarker = `[req:${requirement.id.slice(0, 8)}]`;
         const rawDesc = (requirement.structuredRequirement?.description ?? requirement.pmInput).replace(/[`$"]/g, "'");
         const commitMsg = `${reqMarker} feat: ${rawDesc}`.slice(0, 200);
-        // 提交到沙箱 git
+        // 提交到沙箱 git（精确 stage 计划内文件）
+        const plannedFiles = (requirement.plan ?? []).map((f) => f.path).filter(Boolean);
         try {
-            await repoManager.commit(commitMsg);
+            await repoManager.commit(commitMsg, plannedFiles.length > 0 ? plannedFiles : undefined);
             yield this.progress('committed to sandbox', 95);
         }
         catch (e) {

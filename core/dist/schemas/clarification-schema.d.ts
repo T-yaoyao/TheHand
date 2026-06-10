@@ -49,6 +49,7 @@ export declare const StructuredRequirementSchema: z.ZodObject<{
 export declare const ClarificationOutputSchema: z.ZodObject<{
     needsMoreInfo: z.ZodBoolean;
     questions: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
+    detectedAmbiguities: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
     requirement: z.ZodOptional<z.ZodObject<{
         type: z.ZodString;
         entity: z.ZodString;
@@ -102,6 +103,7 @@ export declare const ClarificationOutputSchema: z.ZodObject<{
         }[] | undefined;
         isDefaulted?: boolean | undefined;
     } | undefined;
+    detectedAmbiguities?: string[] | undefined;
 }, {
     needsMoreInfo: boolean;
     round: number;
@@ -117,5 +119,6 @@ export declare const ClarificationOutputSchema: z.ZodObject<{
         }[] | undefined;
         isDefaulted?: boolean | undefined;
     } | undefined;
+    detectedAmbiguities?: string[] | undefined;
 }>;
 //# sourceMappingURL=clarification-schema.d.ts.map

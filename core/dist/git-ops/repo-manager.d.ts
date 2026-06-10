@@ -50,8 +50,11 @@ export declare class RepoManager {
     /**
      * 提交代码（通过临时文件传递 message，避免 shell 转义问题）
      * 注意：executor 可能在 Docker 容器内运行，所以 git 命令必须用相对路径
+     *
+     * @param message       commit 消息
+     * @param specificFiles 可选，指定要 stage 的文件列表。不传则 stage 全部（向后兼容）
      */
-    commit(message: string): Promise<CommitResult>;
+    commit(message: string, specificFiles?: string[]): Promise<CommitResult>;
     /**
      * 推送分支到远程
      */

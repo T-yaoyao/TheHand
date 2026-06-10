@@ -37,6 +37,8 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
+  /** 等待 commit 完成的 requirement id（commit 后通过 SSE completed 事件触发 PR 对话框） */
+  const pendingCommitPrRef = useRef<string | null>(null)
   const selectedRef = useRef<Requirement | null>(null)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout>>()
   const suppressAutoPlanTabRef = useRef(false)
@@ -213,6 +215,20 @@ export function App() {
       setThinking(false)
       setPendingApproval(false)
       setTab('progress')
+
+      // commit 完成后显示 PR 对话框（通过 SSE 事件触发，而非乐观更新）
+      if (latestEvent.type === 'completed' && pendingCommitPrRef.current) {
+        const rid = pendingCommitPrRef.current
+        pendingCommitPrRef.current = null
+        setSelected(prev => prev && prev.id === rid ? { ...prev, status: 'done' } : prev)
+        setRequirements(prev => prev.map(r => r.id === rid ? { ...r, status: 'done' } : r))
+        setDiffData(null)
+        setPostCommitPrDialogId(rid)
+        showToast('success', '代码已提交并应用到源仓库')
+      } else if (latestEvent.type === 'failed' && pendingCommitPrRef.current) {
+        pendingCommitPrRef.current = null
+        showToast('error', latestEvent.error || '提交失败，沙箱已保留，您可以排查问题后重试')
+      }
     }
   }, [latestEvent, selected?.id, refreshList])
 
@@ -601,15 +617,12 @@ export function App() {
                           const rid = selected.id
                           try {
                             await api.commitChanges(rid)
-                            setThinking(false)
-                            setSelected(prev => prev && prev.id === rid ? { ...prev, status: 'done' } : prev)
-                            setRequirements(prev => prev.map(r => r.id === rid ? { ...r, status: 'done' } : r))
+                            // 不乐观更新 status，等待 SSE completed/failed 事件触发 PR 对话框
+                            pendingCommitPrRef.current = rid
                             setDiffData(null)
-                            showToast('success', '代码已提交，正在应用到源仓库')
-                            await refreshList()
+                            showToast('success', '提交中，等待完成...')
                             reconnect()
                             setTab('progress')
-                            setPostCommitPrDialogId(rid)
                           } catch (e: unknown) {
                             showToast('error', e instanceof Error ? e.message : '提交失败')
                             setThinking(false)

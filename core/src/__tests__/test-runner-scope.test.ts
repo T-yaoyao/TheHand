@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeTestScope, scopeTestCommand } from '../git-ops/test-runner.js'
+import { computeTestScope, scopeTestCommand, isNoTestFilesFound } from '../git-ops/test-runner.js'
 
 describe('computeTestScope', () => {
   it('should return null for empty array', () => {
@@ -10,16 +10,25 @@ describe('computeTestScope', () => {
     expect(computeTestScope(['package.json'])).toBeNull()
   })
 
-  it('should return the top-level dir when all files are in same dir', () => {
-    expect(computeTestScope(['frontend/src/routes/Article/Article.jsx'])).toBe('frontend')
+  it('should return the file directory for single file', () => {
+    expect(computeTestScope(['frontend/src/routes/Article/Article.jsx'])).toBe('frontend/src/routes/Article')
   })
 
-  it('should return top-level dir for multiple files in same dir', () => {
+  it('should return common parent dir for multiple files in same subtree', () => {
     const files = [
       'frontend/src/routes/Article/Article.jsx',
-      'frontend/src/components/Header.jsx',
-      'frontend/src/utils/helpers.js',
+      'frontend/src/routes/Article/CommentsSection.jsx',
     ]
+    // common dir: frontend/src/routes/Article → parent: frontend/src/routes
+    expect(computeTestScope(files)).toBe('frontend/src/routes')
+  })
+
+  it('should return common prefix parent for files in different subtrees', () => {
+    const files = [
+      'frontend/src/routes/Article/Article.jsx',
+      'frontend/src/components/Header/Header.jsx',
+    ]
+    // common dir: frontend/src → parent: frontend
     expect(computeTestScope(files)).toBe('frontend')
   })
 
@@ -32,11 +41,29 @@ describe('computeTestScope', () => {
   })
 
   it('should handle Windows-style paths', () => {
-    expect(computeTestScope(['frontend\\src\\App.jsx'])).toBe('frontend')
+    expect(computeTestScope(['frontend\\src\\App.jsx'])).toBe('frontend/src')
   })
 
   it('should return null for mix of root and subdirectory files', () => {
     expect(computeTestScope(['README.md', 'frontend/src/App.jsx'])).toBeNull()
+  })
+
+  it('should return file dir for two files in same directory', () => {
+    const files = [
+      'frontend/src/routes/Article/Article.jsx',
+      'frontend/src/routes/Article/Article.test.jsx',
+    ]
+    // common dir: frontend/src/routes/Article → parent: frontend/src/routes
+    expect(computeTestScope(files)).toBe('frontend/src/routes')
+  })
+
+  it('should handle files at different depths', () => {
+    const files = [
+      'frontend/src/App.jsx',
+      'frontend/src/routes/Article/Article.jsx',
+    ]
+    // common dir: frontend/src → parent: frontend
+    expect(computeTestScope(files)).toBe('frontend')
   })
 })
 
@@ -67,5 +94,30 @@ describe('scopeTestCommand', () => {
 
   it('should trim whitespace from base command', () => {
     expect(scopeTestCommand('npm test  ', 'frontend')).toBe('npm test -- frontend')
+  })
+})
+
+describe('isNoTestFilesFound', () => {
+  it('should detect vitest "No test files found" message', () => {
+    const output = `No test files found, exiting with code 1\n\nfilter: frontend/src/components/ArticlesPreview`
+    expect(isNoTestFilesFound(output)).toBe(true)
+  })
+
+  it('should detect case-insensitive match', () => {
+    expect(isNoTestFilesFound('NO TEST FILES FOUND')).toBe(true)
+  })
+
+  it('should return false for actual test failures', () => {
+    const output = `FAIL frontend/src/components/PopularTags/PopularTags.test.jsx\nTypeError: Cannot read properties of undefined`
+    expect(isNoTestFilesFound(output)).toBe(false)
+  })
+
+  it('should return false for empty output', () => {
+    expect(isNoTestFilesFound('')).toBe(false)
+  })
+
+  it('should detect vitest output with MISSING DEPENDENCY warning', () => {
+    const output = `MISSING DEPENDENCY  Cannot find dependency 'jsdom'\n\nNo test files found, exiting with code 1\n\nfilter: frontend/src/components/ArticlesPreview`
+    expect(isNoTestFilesFound(output)).toBe(true)
   })
 })

@@ -1,7 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { mkdtemp, rm, mkdir, readdir, stat, copyFile, readlink, symlink } from 'fs/promises';
-import { join, dirname } from 'path';
+import { join, relative, dirname, resolve } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 const execAsync = promisify(exec);
@@ -117,7 +117,8 @@ export class SandboxManager {
         // 重新安装依赖
         await execAsync('npm install --ignore-scripts', { cwd: sandboxPath });
         // 在沙箱中初始化 git（支持 diff、commit 等操作）
-        await execAsync('git init && git add -A && git commit -m "initial snapshot" --allow-empty', { cwd: sandboxPath });
+        // 必须配置 user.name/user.email，否则 Windows 上 commit 会失败
+        await execAsync('git init && git config user.email "thehand@sandbox" && git config user.name "TheHand Sandbox" && git add -A && git commit -m "initial snapshot" --allow-empty', { cwd: sandboxPath });
         const sandbox = {
             path: sandboxPath,
             cleanup: async () => {
@@ -171,10 +172,22 @@ export class SandboxManager {
             await mkdir(dirname(dest), { recursive: true });
             await copyFile(src, dest);
         }
-        // 2. 在源仓库中提交
+        // 2. 在源仓库中提交（只 stage 本次 apply 的文件，避免误提交源仓库累积的无关变更）
         if (commitMessage) {
             try {
-                await execAsync('git add -A', { cwd: this.sourcePath });
+                const resolvedSource = resolve(this.sourcePath);
+                const stageArgs = files
+                    .map(f => resolve(this.sourcePath, f))
+                    .filter(f => f.startsWith(resolvedSource))
+                    .map(f => relative(this.sourcePath, f));
+                if (stageArgs.length > 0) {
+                    await execAsync(`git add -- ${stageArgs.map(f => `"${f}"`).join(' ')}`, { cwd: this.sourcePath });
+                }
+                // 检查 staged 区是否有内容
+                const { stdout: staged } = await execAsync('git diff --cached --name-only', { cwd: this.sourcePath });
+                if (!staged.trim()) {
+                    return;
+                }
                 await execAsync(`git commit -m "${commitMessage.replace(/"/g, '\\"')}"`, { cwd: this.sourcePath });
             }
             catch (e) {

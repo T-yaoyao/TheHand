@@ -133,9 +133,26 @@ export class RepoManager {
   /**
    * 提交代码（通过临时文件传递 message，避免 shell 转义问题）
    * 注意：executor 可能在 Docker 容器内运行，所以 git 命令必须用相对路径
+   *
+   * @param message       commit 消息
+   * @param specificFiles 可选，指定要 stage 的文件列表。不传则 stage 全部（向后兼容）
    */
-  async commit(message: string): Promise<CommitResult> {
-    await this.stageAll()
+  async commit(message: string, specificFiles?: string[]): Promise<CommitResult> {
+    if (specificFiles && specificFiles.length > 0) {
+      // 精确 stage：只添加指定文件，避免沙箱累积的无关变更被误提交
+      await this.stageFiles(specificFiles)
+    } else {
+      await this.stageAll()
+    }
+
+    // 检查是否有 staged 变更，避免 "nothing to commit" 错误
+    const { stdout: status } = await this.executor('git diff --cached --name-only')
+    if (status.trim() === '') {
+      console.log('[repo-manager] 无 staged 变更，跳过 commit')
+      const { stdout: head } = await this.executor('git rev-parse --short HEAD')
+      return { hash: head.trim(), message: '(no changes)' }
+    }
+
     // 写入临时文件（用宿主机路径，因为 sandbox 目录是 volume 挂载的）
     const hostMsgFile = join(this.sandboxPath, '.git', 'COMMIT_MSG_TMP')
     try {

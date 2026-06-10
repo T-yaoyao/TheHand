@@ -1,5 +1,5 @@
 import { BasePhaseHandler } from '../phase-handler.js';
-import { runClarification } from '../../agents/clarification-agent.js';
+import { runClarification, expandClarificationQuestions } from '../../agents/clarification-agent.js';
 import { validateRequirement, validationErrorsToQuestions } from '../../utils/requirement-validator.js';
 import { transition } from '../state-machine.js';
 import { Logger } from '../../utils/logger.js';
@@ -65,7 +65,7 @@ export class ClarificationPhase extends BasePhaseHandler {
     }
     async *handleNeedsMoreInfo(ctx, result, currentRound) {
         const { requirement, requirementMemory } = ctx;
-        const questions = result.questions ?? [];
+        const questions = expandClarificationQuestions(result.questions ?? [], result.detectedAmbiguities);
         for (const q of questions) {
             await requirementMemory.addConversation({
                 id: crypto.randomUUID(),

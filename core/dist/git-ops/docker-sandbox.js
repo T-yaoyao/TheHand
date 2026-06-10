@@ -143,8 +143,21 @@ export class DockerSandboxManager {
                     console.log('[applyToSource] nothing to commit, skipping');
                     return;
                 }
-                execFileSync('git', ['add', '-A'], { cwd: this.sourcePath, timeout: 30_000 });
-                console.log('[applyToSource] git add done');
+                // 只 stage 本次 apply 的文件，不用 git add -A（避免误提交源仓库累积的无关变更）
+                const stageFiles = files.filter(f => {
+                    const dest = resolve(this.sourcePath, f);
+                    return dest.startsWith(resolvedSource);
+                });
+                if (stageFiles.length > 0) {
+                    execFileSync('git', ['add', '--', ...stageFiles], { cwd: this.sourcePath, timeout: 30_000 });
+                    console.log(`[applyToSource] git add ${stageFiles.length} specific files`);
+                }
+                // 检查 staged 区是否有内容
+                const staged = execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: this.sourcePath, timeout: 10_000 }).toString().trim();
+                if (!staged) {
+                    console.log('[applyToSource] nothing staged after git add, skipping commit');
+                    return;
+                }
                 execFileSync('git', ['commit', '-m', commitMessage], { cwd: this.sourcePath, timeout: 30_000 });
                 console.log('[applyToSource] git commit done');
             }

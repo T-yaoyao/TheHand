@@ -1,4 +1,4 @@
-import { runClarification } from '../agents/clarification-agent.js';
+import { runClarification, expandClarificationQuestions } from '../agents/clarification-agent.js';
 import { createPlanAgent } from '../agents/plan-agent.js';
 import { createBoundaryTestAgent } from '../agents/test-agent.js';
 import { runCodingBatch, extractInterfaceSummary, extractAvailableDependencies, validateImports } from '../agents/coding-agent.js';
@@ -96,7 +96,7 @@ export class Orchestrator {
             // ── 状态检测：根据当前阶段跳转到对应入口 ──
             if (requirement.status === 'diff-ready') {
                 // 跳转到提交阶段（用户已确认 diff）
-                yield* this.phaseCommit(requirement, requirementMemory, repoManager, sandboxManager, sandbox);
+                yield* this.phaseCommit(requirement, requirementMemory, repoManager, sandboxManager, sandbox, executor);
                 return;
             }
             if ((requirement.status === 'plan-ready' || requirement.status === 'plan-approved') && requirement.plan) {
@@ -120,7 +120,7 @@ export class Orchestrator {
                 .map(c => c.content);
             const clarificationResult = await runClarification(llmClient, promptManager, pmInput, projectContext, requirement.structuredRequirement, currentRound, previousQuestions, pmReplies.map(c => c.content));
             if (clarificationResult.needsMoreInfo) {
-                const questions = clarificationResult.questions ?? [];
+                const questions = expandClarificationQuestions(clarificationResult.questions ?? [], clarificationResult.detectedAmbiguities);
                 for (const q of questions) {
                     await requirementMemory.addConversation({
                         id: crypto.randomUUID(),
@@ -1437,6 +1437,23 @@ export class Orchestrator {
                 phase: `unexpected changes: ${diffResult.unexpectedFiles?.join(', ')}`,
                 progress: 85,
             };
+            // 自动回滚非预期变更：撤销沙箱中计划外文件的修改，确保 commit 干净
+            if (diffResult.unexpectedFiles && diffResult.unexpectedFiles.length > 0) {
+                try {
+                    for (const f of diffResult.unexpectedFiles) {
+                        await executor(`git checkout -- "${f}" 2>/dev/null || git rm --cached "${f}" 2>/dev/null || true`, { timeout: 5_000 });
+                    }
+                    this.logger.info(`已回滚 ${diffResult.unexpectedFiles.length} 个非预期变更文件`);
+                    yield {
+                        type: 'executing',
+                        phase: `reverted ${diffResult.unexpectedFiles.length} unexpected files`,
+                        progress: 86,
+                    };
+                }
+                catch (revertErr) {
+                    this.logger.warn(`回滚非预期变更失败: ${revertErr.message}`);
+                }
+            }
         }
         // 获取 diff 内容，暂停等用户确认
         let diffContent = '';
@@ -1463,24 +1480,70 @@ export class Orchestrator {
     }
     /**
      * 提交+应用阶段（支持从 diff-ready 状态直接进入）
+     *
+     * 防御策略：
+     * - commit 前强制设置 git user config（兼容旧沙箱）
+     * - commit 失败时保留沙箱（sandboxShouldCleanup = false），允许重试
+     * - 最多重试 2 次 commit（第一次可能因环境配置失败）
      */
-    async *phaseCommit(requirement, requirementMemory, repoManager, sandboxManager, sandbox) {
+    async *phaseCommit(requirement, requirementMemory, repoManager, sandboxManager, sandbox, executor) {
+        // 保留沙箱：commit 失败时不清理，允许用户重试
+        this.sandboxShouldCleanup = false;
         yield { type: 'executing', phase: 'committing', progress: 90 };
+        // 安全网：确保 git user config 存在（兼容旧沙箱 / Docker 容器重建场景）
+        if (executor) {
+            try {
+                await executor('git config user.email "thehand@sandbox" && git config user.name "TheHand Sandbox"', { timeout: 5_000 });
+            }
+            catch {
+                // 非致命：commit 本身会报错
+            }
+        }
         const reqMarker = `[req:${requirement.id.slice(0, 8)}]`;
         const rawDesc = (requirement.structuredRequirement?.description ?? requirement.pmInput).replace(/[`$"]/g, "'");
         const commitMsg = `${reqMarker} feat: ${rawDesc}`.slice(0, 200);
-        try {
-            await repoManager.commit(commitMsg);
-            yield { type: 'executing', phase: 'committed to sandbox', progress: 95 };
+        // 从 plan 中提取计划文件列表，用于精确 stage（避免沙箱累积的无关变更被误提交）
+        const plannedFiles = (requirement.plan ?? []).map((f) => f.path).filter(Boolean);
+        // commit 重试循环：最多 2 次
+        const MAX_COMMIT_RETRIES = 2;
+        let commitSuccess = false;
+        let lastCommitError = '';
+        for (let attempt = 1; attempt <= MAX_COMMIT_RETRIES; attempt++) {
+            try {
+                await repoManager.commit(commitMsg, plannedFiles.length > 0 ? plannedFiles : undefined);
+                commitSuccess = true;
+                yield { type: 'executing', phase: 'committed to sandbox', progress: 95 };
+                break;
+            }
+            catch (e) {
+                lastCommitError = e.stderr || e.stdout || e.message || String(e);
+                const errMsg = lastCommitError.slice(0, 200);
+                if (attempt < MAX_COMMIT_RETRIES) {
+                    yield { type: 'executing', phase: `commit attempt ${attempt} failed: ${errMsg}, retrying...`, progress: 92 };
+                    // 重试前确保 git config 正确
+                    if (executor) {
+                        try {
+                            await executor('git config user.email "thehand@sandbox" && git config user.name "TheHand Sandbox"', { timeout: 5_000 });
+                        }
+                        catch { }
+                    }
+                }
+            }
         }
-        catch (e) {
-            yield { type: 'executing', phase: `commit failed: ${e.message}`, progress: 95 };
-            requirement.status = 'failed';
+        if (!commitSuccess) {
+            // commit 彻底失败：保留沙箱（sandboxShouldCleanup 已设为 false）
+            // 状态保持 diff-ready，允许用户排查后重试
+            requirement.status = 'diff-ready';
             await requirementMemory.saveRequirement(requirement);
-            yield { type: 'failed', requirement, error: `沙箱 commit 失败: ${e.message}`, userMessage: '代码提交失败，可能是沙箱环境的 Git 配置问题。请联系开发者排查。' };
+            yield {
+                type: 'failed',
+                requirement,
+                error: `沙箱 commit 失败 (${MAX_COMMIT_RETRIES} 次尝试): ${lastCommitError}`,
+                userMessage: `代码提交失败。沙箱环境已保留，您可以排查问题后重新点击"确认提交"重试。\n\n错误详情: ${lastCommitError.slice(0, 500)}`,
+            };
             return;
         }
-        // 应用到源仓库 — 从刚提交的 commit 中获取变更文件列表
+        // commit 成功 → 应用到源仓库
         yield { type: 'executing', phase: 'applying-to-source', progress: 97 };
         let changedFiles = [];
         try {
@@ -1489,7 +1552,7 @@ export class Orchestrator {
         }
         catch { }
         if (changedFiles.length === 0) {
-            // fallback: validOutputs from phaseCoding (if available)
+            // fallback: use plan file list
             changedFiles = (requirement.plan ?? []).map((f) => f.path).filter(Boolean);
         }
         try {
@@ -1497,15 +1560,17 @@ export class Orchestrator {
             yield { type: 'executing', phase: 'applied to source', progress: 98 };
         }
         catch (e) {
-            yield { type: 'executing', phase: `apply failed: ${e.message}`, progress: 98 };
-            requirement.status = 'failed';
+            // apply 失败也保留沙箱
+            const applyErr = e.stderr || e.message || String(e);
+            yield { type: 'executing', phase: `apply failed: ${applyErr}`, progress: 98 };
+            requirement.status = 'diff-ready';
             await requirementMemory.saveRequirement(requirement);
-            yield { type: 'failed', requirement, error: `应用到源仓库失败: ${e.message}`, userMessage: '代码变更未能应用到源仓库。沙箱中的代码仍然保留，请联系开发者排查。' };
+            yield { type: 'failed', requirement, error: `应用到源仓库失败: ${applyErr}`, userMessage: '代码变更未能应用到源仓库。沙箱中的代码仍然保留，请排查后重试提交。' };
             return;
         }
-        // 完成
+        // 全部成功 → 清理沙箱，标记完成
+        this.sandboxShouldCleanup = true;
         requirement.status = 'done';
-        // NOTE: transition() 已集成到 phase handlers，此处保留兼容路径
         await requirementMemory.saveRequirement(requirement);
         yield { type: 'completed', requirement };
     }

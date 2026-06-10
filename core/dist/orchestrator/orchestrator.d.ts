@@ -48,6 +48,11 @@ export declare class Orchestrator {
     private phaseCoding;
     /**
      * 提交+应用阶段（支持从 diff-ready 状态直接进入）
+     *
+     * 防御策略：
+     * - commit 前强制设置 git user config（兼容旧沙箱）
+     * - commit 失败时保留沙箱（sandboxShouldCleanup = false），允许重试
+     * - 最多重试 2 次 commit（第一次可能因环境配置失败）
      */
     private phaseCommit;
     /**
